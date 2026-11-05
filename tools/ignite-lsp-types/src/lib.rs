@@ -711,6 +711,14 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// Whether `ir` names an enumeration without custom values.
+    fn closed_enumeration(&self, ir: &Ir) -> bool {
+        match ir {
+            Ir::Named(name) => matches!(self.items.get(name), Some(Item::Enum(_, e)) if !e.custom),
+            _ => false,
+        }
+    }
+
     fn helper(&mut self, ir: &Ir) {
         let key = self.key(ir);
         if self.helpers.contains_key(&key) {
@@ -720,6 +728,31 @@ impl<'a> Gen<'a> {
         let t = self.ty_text(ir);
         let mut out = String::new();
         match ir {
+            Ir::List(x) if self.closed_enumeration(x) => {
+                let e = self.ty_text(x);
+                let encode = self.encode(x, "item");
+                let _ = write!(
+                    out,
+                    "// A JSON array of {e}; an item that is none of its values is skipped (LSP 3.17,\n\
+                     // \"Enumerations\": the using side \"shouldn't fail on an enumeration value it\n\
+                     // doesn't know\"), so a client capability's `valueSet` that names a newer value\n\
+                     // still decodes.\n\
+                     fn decode_{key}(value: Json, at: Text) -> Result<{t}, Text> = match value {{\n  \
+                       Json.Array(items) => {{\n    \
+                         var out: {t} = []\n    \
+                         for item in items {{\n      \
+                           match {e}.from_json(item) {{\n        \
+                             Ok(known) => out.push(known)\n        \
+                             Err(_) => {{}}\n      \
+                           }}\n    \
+                         }}\n    \
+                         Ok(out)\n  \
+                       }}\n  \
+                       _ => Err(at + \": expected an array\")\n\
+                     }}\n\n\
+                     fn encode_{key}(items: {t}) -> Json = Json.Array(items.map(|item| {encode}))\n"
+                );
+            }
             Ir::List(x) => {
                 let e = self.ty_text(x);
                 let decode = self.decode(x, "item", "\"{at}[{index}]\"");
@@ -1186,6 +1219,17 @@ pub fn sha256_hex(text: &str) -> String {
 /// The Ignite module `package` of every type reachable from `roots` of the meta model
 /// `text`; its header names the meta model's version and SHA-256.
 pub fn generate(text: &str, roots: &[String], package: &str) -> Result<String, Error> {
+    generate_with_types(text, roots, &[], package)
+}
+
+/// [`generate`] with `types` as further roots: structures, enumerations or type aliases of
+/// the meta model that no root method reaches, such as `ErrorCodes`.
+pub fn generate_with_types(
+    text: &str,
+    roots: &[String],
+    types: &[String],
+    package: &str,
+) -> Result<String, Error> {
     let sha256 = sha256_hex(text);
     let model = MetaModel::parse(text).map_err(Error::Malformed)?;
     let mut emitter = Gen {
@@ -1235,6 +1279,22 @@ pub fn generate(text: &str, roots: &[String], package: &str) -> Result<String, E
         let _ = writeln!(consts, "// metaModel: {origin} ({detail})");
         let _ = writeln!(consts, "const {}: Text = {}", method_const(root), lit(root));
         let _ = writeln!(consts);
+    }
+
+    for name in types {
+        let known = model.structures.iter().any(|s| &s.name == name)
+            || model.enumerations.iter().any(|e| &e.name == name)
+            || model.aliases.iter().any(|a| &a.name == name);
+        if !known {
+            return refuse(format!(
+                "root type `{name}` is no structure, enumeration or type alias of the meta model"
+            ));
+        }
+        emitter.lower(
+            &Type::Reference(name.clone()),
+            name,
+            &format!("root type {name}"),
+        )?;
     }
 
     let items: Vec<(String, Item)> = emitter
@@ -1294,6 +1354,9 @@ pub fn generate(text: &str, roots: &[String], package: &str) -> Result<String, E
         model.version, sha256
     );
     let _ = writeln!(out, "// Roots: {}.", roots.join(", "));
+    if !types.is_empty() {
+        let _ = writeln!(out, "// Root types: {}.", types.join(", "));
+    }
     let summary: Vec<String> = counts.iter().map(|(k, v)| format!("{v} {k}")).collect();
     let _ = writeln!(out, "// Items: {}.", summary.join(", "));
     let _ = writeln!(out, "//");

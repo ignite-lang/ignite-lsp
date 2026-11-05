@@ -1,13 +1,14 @@
-//! `ignite-lsp-types --meta-model PATH --root METHOD... --out PATH`: writes the Ignite module of
-//! LSP message types reachable from the root methods. Exit 0 written, 1 a reachable type is
-//! refused (the message names it), 2 a usage error or a malformed meta model, 3 a file error.
+//! `ignite-lsp-types --meta-model PATH --root METHOD... [--root-type NAME...] --out PATH`: writes
+//! the Ignite module of LSP message types reachable from the root methods and root types. Exit 0
+//! written, 1 a reachable type is refused (the message names it), 2 a usage error or a malformed
+//! meta model, 3 a file error.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
 
-use ignite_lsp_types::{Error, generate};
+use ignite_lsp_types::{Error, generate_with_types};
 
 #[derive(Parser)]
 #[command(
@@ -21,6 +22,10 @@ struct Args {
     /// A request or notification whose params and result types are generated; repeatable.
     #[arg(long, required = true)]
     root: Vec<String>,
+    /// A structure, enumeration or type alias generated although no root method reaches it
+    /// (`ErrorCodes`); repeatable.
+    #[arg(long)]
+    root_type: Vec<String>,
     /// The Ignite module to write.
     #[arg(long)]
     out: PathBuf,
@@ -38,7 +43,7 @@ fn main() -> ExitCode {
             return ExitCode::from(3);
         }
     };
-    let module = match generate(&text, &args.root, &args.package) {
+    let module = match generate_with_types(&text, &args.root, &args.root_type, &args.package) {
         Ok(module) => module,
         Err(error) => {
             eprintln!("ignite-lsp-types: {error}");

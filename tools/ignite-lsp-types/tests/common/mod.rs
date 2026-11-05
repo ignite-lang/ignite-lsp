@@ -21,10 +21,17 @@ pub const ROOTS: &[&str] = &[
     "$/cancelRequest",
 ];
 
+/// The root types of `task lsp-types` (story:lsp-server).
+pub const ROOT_TYPES: &[&str] = &["ErrorCodes", "LSPErrorCodes"];
+
 pub const PACKAGE: &str = "examples.lsp.lsp_types";
 
 pub fn roots() -> Vec<String> {
     ROOTS.iter().map(|r| r.to_string()).collect()
+}
+
+pub fn root_types() -> Vec<String> {
+    ROOT_TYPES.iter().map(|r| r.to_string()).collect()
 }
 
 pub fn meta_model() -> String {

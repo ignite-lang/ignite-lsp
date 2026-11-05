@@ -5,4 +5,5 @@
 mod adversary;
 mod common;
 mod drift;
+mod enumerations;
 mod refusal;
