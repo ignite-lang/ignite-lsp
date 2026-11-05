@@ -7,9 +7,11 @@ import std.option.unwrap_or
 import std.result.map_err
 import std.process.{Invocation, ChildExit}
 import std.protocol.jsonrpc.{
-  JsonRpcLimits, Frame, Split, split_frame, frame, read_message, Message, Request, Notification,
-  Response, ErrorObject, encode_message, decode_body, detected_id, READ_SIZE
+  JsonRpcLimits, Frame, FrameError, Split, split_frame, content_length, frame, read_message,
+  Message, Request, Notification, Response, ErrorObject, encode_message, decode_body,
+  detected_id, notification_batch, READ_SIZE
 }
+import std.text.{bytes_find_from, to_lower}
 import std.rfc.language_server_3_17.{LANGUAGE_SERVER_3_17}
 import examples.lsp.lsp_types.{
   METHOD_INITIALIZE, METHOD_INITIALIZED, METHOD_SHUTDOWN, METHOD_EXIT,
@@ -55,7 +57,7 @@ type LspServer {
 // `shutdown`, else 1 (LSP 3.17, "Exit Notification").
 fn LspServer.main(self: LspServer) -> Result<Unit, IoError> {
   let checker = Checker { tools = self.tools, program = self.compiler.value() }
-  let code = LanguageServer.serve(Standard, checker)?
+  let code = LanguageServer.serve(Standard, checker, JsonRpcLimits {})?
   if code != 0 {
     Process.exit(code)?
   }
@@ -97,20 +99,77 @@ fn wire_close(wire: Wire) -> Result<Unit, IoError> requires [wire.*] = match wir
   Standard => Ok(())
 }
 
-// The next message on `wire`, after the bytes already read in `buffer`, framed by
-// `std.protocol.jsonrpc` (`split_frame`).
-fn next_frame(wire: Wire, buffer: Bytes) -> Result<Frame, IoError> requires [wire.*, stdin.read] {
+// What comes next on the wire: a message body and the bytes read after it; a body over the
+// limit, of this many bytes, read past, and the bytes after it; the end of input between
+// messages; or a framing error, after which the input cannot be read further.
+enum Incoming {
+  Body(Bytes, Bytes)
+  Skipped(Int, Bytes)
+  Ended
+  Broken(FrameError)
+}
+
+// The next message on `wire` under `limits`, after the bytes already read in `buffer`, framed
+// by `std.protocol.jsonrpc` (`split_frame`). A body over the limit whose header is valid is
+// read and dropped as it arrives, never kept, so the session can go on after it.
+fn next_frame(wire: Wire, limits: JsonRpcLimits, buffer: Bytes) -> Result<Incoming, IoError> requires [wire.*, stdin.read] {
   var data = buffer
   loop {
-    match split_frame(data, JsonRpcLimits {}) {
-      Framed(found) => return Ok(found)
+    match split_frame(data, limits) {
+      Framed(found) => return match found {
+        Got(body, rest) => Ok(Body(body, rest))
+        Closed => Ok(Ended)
+        Failed(BodyTooLarge) => match header_of(data) {
+          Some((end, length)) => skip(wire, data.slice(end, data.len()), length)
+          None => Ok(Broken(BodyTooLarge))
+        }
+        Failed(error) => Ok(Broken(error))
+      }
       Partial => {}
     }
     match wire_read(wire)? {
-      Eof => return Ok(if data.is_empty() { Closed } else { Failed(Truncated) })
+      Eof => return Ok(if data.is_empty() { Ended } else { Broken(Truncated) })
       Data(more) => data.append(more)
     }
   }
+}
+
+// The end of the header at the start of `data` and its `Content-Length`, when both are there.
+fn header_of(data: Bytes) -> Option<(Int, Int)> = match bytes_find_from(data, b"\r\n\r\n", 0) {
+  Some(at) => match content_length(data.slice(0, at).to_text()) {
+    Ok(length) => Some((at + 4, length))
+    Err(_) => None
+  }
+  None => None
+}
+
+// Reads past a body of `length` bytes on `wire` that starts with `read`, the bytes already
+// read after its header.
+fn skip(wire: Wire, read: Bytes, length: Int) -> Result<Incoming, IoError> requires [wire.*, stdin.read] {
+  var left = length
+  var data = read
+  loop {
+    if data.len() >= left {
+      return Ok(Skipped(length, data.slice(left, data.len())))
+    }
+    left = left - data.len()
+    match wire_read(wire)? {
+      Eof => return Ok(Broken(Truncated))
+      Data(more) => {
+        data = more
+      }
+    }
+  }
+}
+
+// What a framing error is, for the line the server writes to stderr before it ends.
+fn framing(error: FrameError) -> Text = match error {
+  MissingLength => "a message header has no Content-Length"
+  InvalidLength => "a message header has an invalid Content-Length"
+  MalformedHeader => "a message header line is not `Name: value`"
+  HeaderTooLarge => "a message header is over its limit"
+  BodyTooLarge => "a message body is over its limit"
+  Truncated => "the input ended inside a message"
 }
 
 // `message` framed with its `Content-Length` header (LSP 3.17, "Header Part").
@@ -309,13 +368,26 @@ type Checker {
   prefix: List<Text> = []
 }
 
-// The file path of a `file:` URI, percent-decoded; none for any other scheme.
+// The path a document whose URI has none (`untitled:`, another scheme, a remote host) is
+// checked under: a file in `/` that is never read, so the buffer still gets its diagnostics
+// and a program with a `package` finds no sibling modules.
+const STAND_IN_PATH: Text = "/untitled.ignite"
+
+// The file path of a `file:` URI with an empty or a `localhost` authority (RFC 8089 section
+// 2), percent-decoded; none for another host or any other scheme.
 fn path_of(uri: Text) -> Option<Text> {
   let rest = match uri.strip_prefix("file://") {
-    Some(rest) => if rest.starts_with("/") { rest } else { return None }
+    Some(rest) => rest.to_bytes()
     None => return None
   }
-  let bytes = rest.to_bytes()
+  let start = if rest.len() > 0 && rest.at(0) == b'/' {
+    0
+  } else if rest.len() > 9 && rest.slice(0, 9).to_text().to_lower() == "localhost" && rest.at(9) == b'/' {
+    9
+  } else {
+    return None
+  }
+  let bytes = rest.slice(start, rest.len())
   var out = b""
   var at = 0
   while at < bytes.len() {
@@ -519,23 +591,26 @@ protocol LanguageServer conforms [LANGUAGE_SERVER_3_17] scope { parties = [Serve
 
   // Server role: read messages from `wire` until `exit` or the end of input, answer every
   // request, act on the notifications, run `checker` on each opened or changed document and
-  // publish its diagnostics. The exit status: 0 after `shutdown`, else 1; the wire is closed.
-  fn serve(wire: Wire, checker: Checker) -> Result<Int, IoError> requires [wire.*, stdin.read, stdout.write, checker.*] satisfies [
+  // publish its diagnostics. Messages are bounded by `limits`: a body over its limit is read
+  // past and answered with InvalidRequest under a null id; any other framing error is one
+  // line on stderr and the end. The exit status: 0 after `shutdown`, else 1; the wire is
+  // closed.
+  fn serve(wire: Wire, checker: Checker, limits: JsonRpcLimits) -> Result<Int, IoError> requires [wire.*, stdin.read, stdout.write, checker.*] satisfies [
     LANGUAGE_SERVER_3_17.RBASE_REQUEST_1, LANGUAGE_SERVER_3_17.RBASE_RESPONSE_3,
     LANGUAGE_SERVER_3_17.RBASE_RESPONSE_4, LANGUAGE_SERVER_3_17.RBASE_CANCEL_1
   ] {
-    let code = session(wire, checker)
+    let code = session(wire, checker, limits)
     _ = wire_close(wire)
     code
   }
 }
 
-fn session(wire: Wire, checker: Checker) -> Result<Int, IoError> requires [wire.*, stdin.read, stdout.write, checker.*] {
+fn session(wire: Wire, checker: Checker, limits: JsonRpcLimits) -> Result<Int, IoError> requires [wire.*, stdin.read, stdout.write, checker.*] {
   var state = fresh()
   var buffer = Bytes.empty()
   loop {
-    match next_frame(wire, buffer)? {
-      Got(body, rest) => {
+    match next_frame(wire, limits, buffer)? {
+      Body(body, rest) => {
         buffer = rest
         match decode_body(body) {
           Ok(Call(request)) => {
@@ -544,33 +619,63 @@ fn session(wire: Wire, checker: Checker) -> Result<Int, IoError> requires [wire.
             send(wire, Reply(Response { id = Some(request.id), outcome }))?
           }
           Ok(Notify(notification)) => {
-            let (next, acts) = on_notification(state, notification)
+            let (next, exit) = notified(wire, checker, state, notification)?
             state = next
-            for act in acts {
-              match act {
-                Publish(uri) => match state.buffers.get(uri) {
-                  Some(open) => {
-                    let diagnostics = match path_of(uri) {
-                      Some(path) => check(checker, path, open.text, state.encoding)
-                      None => []
-                    }
-                    publish(wire, uri, Some(open.version), diagnostics)?
-                  }
-                  None => {}
-                }
-                Clear(uri) => publish(wire, uri, None, [])?
-                Exit(code) => return Ok(code)
-              }
+            match exit {
+              Some(code) => return Ok(code)
+              None => {}
             }
           }
           Ok(Reply(_)) => {}
-          Err(error) => send(wire, Reply(Response { id = detected_id(body), outcome = Err(error) }))?
+          Err(error) => match notification_batch(body) {
+            Some(notifications) => {
+              for notification in notifications {
+                let (next, exit) = notified(wire, checker, state, notification)?
+                state = next
+                match exit {
+                  Some(code) => return Ok(code)
+                  None => {}
+                }
+              }
+            }
+            None => send(wire, Reply(Response { id = detected_id(body), outcome = Err(error) }))?
+          }
         }
       }
-      Closed => return Ok(if state.phase == ShutDown { 0 } else { 1 })
-      Failed(_) => return Ok(1)
+      Skipped(length, rest) => {
+        buffer = rest
+        let message = "a message body of {length} bytes is over the limit of {limits.body.to_int()} bytes"
+        log("ignite-lsp: {message}: skipped")
+        send(wire, Reply(Response { id = None, outcome = Err(failure(ErrorCodes.InvalidRequest, message)) }))?
+      }
+      Ended => return Ok(if state.phase == ShutDown { 0 } else { 1 })
+      Broken(error) => {
+        log("ignite-lsp: {framing(error)}; the input cannot be read further, exiting")
+        return Ok(1)
+      }
     }
   }
+}
+
+// The session after `notification` and its acts done: each opened or changed document
+// checked and its diagnostics published, a closed one's cleared; the exit status when it is
+// `exit`. A document without a file path is checked under `STAND_IN_PATH`.
+fn notified(wire: Wire, checker: Checker, state: Session, notification: Notification) -> Result<(Session, Option<Int>), IoError> requires [wire.*, stdout.write, checker.*] {
+  let (next, acts) = on_notification(state, notification)
+  for act in acts {
+    match act {
+      Publish(uri) => match next.buffers.get(uri) {
+        Some(open) => {
+          let path = path_of(uri).unwrap_or(STAND_IN_PATH)
+          publish(wire, uri, Some(open.version), check(checker, path, open.text, next.encoding))?
+        }
+        None => {}
+      }
+      Clear(uri) => publish(wire, uri, None, [])?
+      Exit(code) => return Ok((next, Some(code)))
+    }
+  }
+  Ok((next, None))
 }
 
 // ---- tests ------------------------------------------------------------------------------
@@ -615,12 +720,20 @@ test fn replies_of(client: PipeStream) -> Result<List<Text>, IoError> {
 // `bodies` sent as framed messages to a server on a pipe with `checker`, then the end of
 // input: the server's exit status and every body it wrote.
 test fn exchange(bodies: List<Text>, checker: Checker) -> Result<(Int, List<Text>), IoError> {
-  let (client, server) = connected()?
+  var input = Bytes.empty()
   for body in bodies {
-    client.write_all(frame(body))?
+    input.append(frame(body))
   }
+  exchange_bytes(input, JsonRpcLimits {}, checker)
+}
+
+// `input` sent as it is to a server on a pipe with `limits` and `checker`, then the end of
+// input: the server's exit status and every body it wrote.
+test fn exchange_bytes(input: Bytes, limits: JsonRpcLimits, checker: Checker) -> Result<(Int, List<Text>), IoError> {
+  let (client, server) = connected()?
+  client.write_all(input)?
   _ = client.close()
-  let code = LanguageServer.serve(Piped(server), checker)?
+  let code = LanguageServer.serve(Piped(server), checker, limits)?
   Ok((code, replies_of(client)?))
 }
 
@@ -820,6 +933,70 @@ test "a file URI is its percent-decoded path, another scheme has none" {
   assert path_of("file:///w/with%20space/%C3%A9.ignite") == Some("/w/with space/é.ignite")
   assert path_of("untitled:Untitled-1") == None
   assert path_of("file://host/a.ignite") == None
+}
+
+// RFC 8089 section 2: `localhost` as the authority names the local machine, as an empty one does.
+test "a file URI with the localhost authority is its path" {
+  assert path_of("file://localhost/w/a.ignite") == Some("/w/a.ignite")
+  assert path_of("file://LocalHost/w/a%20b.ignite") == Some("/w/a b.ignite")
+  assert path_of("file://localhost") == None
+  assert path_of("file://localhostx/a.ignite") == None
+}
+
+test "a document that is no file is checked under a stand-in path and gets its diagnostics" {
+  let (_, replies) = exchange([INITIALIZE, open("untitled:Untitled-1", 1, "broken"), EXIT], script(0, 1))?
+  assert replies == [
+    CAPABILITIES_UTF16,
+    r#"{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{"uri":"untitled:Untitled-1","version":1,"diagnostics":[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"severity":1,"code":"E040","source":"ignite","message":"type mismatch"}]}}"#
+  ]
+}
+
+// JSON-RPC 2.0 section 6: a batch of notifications only gets no response; its notifications
+// are acted on in order, as `std.protocol.jsonrpc`'s `serve` does.
+test "a batch of notifications only gets no reply and its notifications are acted on" {
+  let batch = "[".concat(INITIALIZED).concat(",").concat(open("file:///w/a.ignite", 1, "fine")).concat("]")
+  let (code, replies) = exchange([INITIALIZE, batch, SHUTDOWN, EXIT], quiet())?
+  assert code == 0
+  assert replies == [
+    CAPABILITIES_UTF16,
+    r#"{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{"uri":"file:///w/a.ignite","version":1,"diagnostics":[]}}"#,
+    r#"{"jsonrpc":"2.0","id":2,"result":null}"#
+  ]
+}
+
+test "a batch that holds a request is still one invalid-request error" {
+  let batch = "[".concat(SHUTDOWN).concat("]")
+  let (_, replies) = exchange([INITIALIZE, batch, EXIT], quiet())?
+  assert replies == [CAPABILITIES_UTF16, r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"Invalid Request"}}"#]
+}
+
+// A body of 200,000 bytes, over a 1 KiB limit and over several reads: its length is valid,
+// so it is read past and answered with an error under a null id, and the session goes on.
+test "a body over the limit is skipped with an error and the server keeps serving" {
+  var input = frame(INITIALIZE)
+  input.append(b"Content-Length: 200000\r\n\r\n")
+  var body = b"xxxxxxxxxx"
+  while body.len() < 200000 {
+    body.append(b"xxxxxxxxxx")
+  }
+  input.append(body)
+  input.append(frame(SHUTDOWN))
+  input.append(frame(EXIT))
+  let (code, replies) = exchange_bytes(input, JsonRpcLimits { body = 1 KiB }, quiet())?
+  assert code == 0
+  assert replies == [
+    CAPABILITIES_UTF16,
+    r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"a message body of 200000 bytes is over the limit of 1024 bytes"}}"#,
+    r#"{"jsonrpc":"2.0","id":2,"result":null}"#
+  ]
+}
+
+test "a body over the limit that the input ends inside is the end, status 1" {
+  var input = frame(INITIALIZE)
+  input.append(b"Content-Length: 99999999999999\r\n\r\n{}")
+  let (code, replies) = exchange_bytes(input, JsonRpcLimits {}, quiet())?
+  assert code == 1
+  assert replies == [CAPABILITIES_UTF16]
 }
 
 // "a€😀" then "é" on the next line: `a` is 1 byte, `€` 3 bytes and one UTF-16 unit, `😀` 4
