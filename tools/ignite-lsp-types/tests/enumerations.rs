@@ -24,7 +24,9 @@ const TAGS: &str = r#"{
       "properties": [
         { "name": "valueSet", "type": { "kind": "array", "element": { "kind": "reference", "name": "Tag" } } },
         { "name": "kinds", "type": { "kind": "array", "element": { "kind": "reference", "name": "Kind" } } },
-        { "name": "one", "type": { "kind": "reference", "name": "Tag" } }
+        { "name": "one", "type": { "kind": "reference", "name": "Tag" } },
+        { "name": "maybe", "type": { "kind": "reference", "name": "Tag" }, "optional": true },
+        { "name": "plain", "type": { "kind": "reference", "name": "Kind" }, "optional": true }
       ]
     }
   ],
@@ -79,6 +81,45 @@ fn a_single_closed_value_and_a_list_of_an_open_enumeration_stay_as_they_were() {
     assert!(module.contains("_ => Err(\"Tag: not one of its values\")"));
     let open = function(&module, "decode_list_of_kind");
     assert!(open.contains("out.push(Kind.from_json(item)"), "{open}");
+}
+
+/// The lines of `TagParams.from_json` that decode the member `wire`.
+fn member<'m>(module: &'m str, wire: &str) -> &'m str {
+    let decode = function(module, "TagParams.from_json");
+    let start = decode
+        .find(&format!("value.get(\"{wire}\")"))
+        .unwrap_or_else(|| panic!("no member {wire} in\n{decode}"));
+    let rest = &decode[start..];
+    &rest[..rest.find("\n  }\n").unwrap_or(rest.len())]
+}
+
+#[test]
+fn an_optional_closed_value_it_does_not_know_is_absent() {
+    let module = generated(&[]);
+    let maybe = member(&module, "maybe");
+    assert!(
+        maybe.contains("Some(member) => match Tag.from_json(member) {"),
+        "{maybe}"
+    );
+    assert!(maybe.contains("Ok(known) => Some(known)"), "{maybe}");
+    assert!(maybe.contains("Err(_) => Option.None"), "{maybe}");
+    assert!(!maybe.contains('?'), "{maybe}");
+}
+
+#[test]
+fn a_required_closed_value_and_an_optional_open_one_still_refuse() {
+    let module = generated(&[]);
+    let one = member(&module, "one");
+    assert!(
+        one.contains("Some(member) => Tag.from_json(member)"),
+        "{one}"
+    );
+    assert!(one.contains('?'), "{one}");
+    let plain = member(&module, "plain");
+    assert!(
+        plain.contains("Some(member) => Some(Kind.from_json(member)"),
+        "{plain}"
+    );
 }
 
 #[test]

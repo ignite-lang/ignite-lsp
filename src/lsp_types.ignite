@@ -32,7 +32,9 @@ import std.result.map_err
 // arm when the value has its JSON kind (string, number, boolean, array, object).
 // The selected arm's decode error is the union's error; a later arm is tried only
 // when the value does not select an earlier one.
-// Decoding ignores members it does not know.
+// Decoding ignores members it does not know. An enumeration without custom
+// values tolerates a value it does not know (LSP 3.17, "Enumerations"): a list
+// skips it, an optional property holding it is absent; a required one is refused.
 
 // metaModel: requests/initialize (params InitializeParams, result InitializeResult)
 const METHOD_INITIALIZE: Text = "initialize"
@@ -1237,7 +1239,10 @@ fn CompletionClientCapabilities.from_json(value: Json) -> Result<CompletionClien
     Option.None => Option.None
   }
   let f_insert_text_mode = match value.get("insertTextMode") {
-    Some(member) => Some(InsertTextMode.from_json(member).map_err(|e| "CompletionClientCapabilities.insertTextMode" + ": " + e)?)
+    Some(member) => match InsertTextMode.from_json(member) {
+      Ok(known) => Some(known)
+      Err(_) => Option.None
+    }
     Option.None => Option.None
   }
   let f_context_support = match value.get("contextSupport") {
@@ -1816,7 +1821,10 @@ fn Diagnostic.from_json(value: Json) -> Result<Diagnostic, Text> {
     Option.None => return Err("Diagnostic.range: missing")
   }
   let f_severity = match value.get("severity") {
-    Some(member) => Some(DiagnosticSeverity.from_json(member).map_err(|e| "Diagnostic.severity" + ": " + e)?)
+    Some(member) => match DiagnosticSeverity.from_json(member) {
+      Ok(known) => Some(known)
+      Err(_) => Option.None
+    }
     Option.None => Option.None
   }
   let f_code = match value.get("code") {
@@ -3064,7 +3072,10 @@ fn FileOperationPattern.from_json(value: Json) -> Result<FileOperationPattern, T
     Option.None => return Err("FileOperationPattern.glob: missing")
   }
   let f_matches = match value.get("matches") {
-    Some(member) => Some(FileOperationPatternKind.from_json(member).map_err(|e| "FileOperationPattern.matches" + ": " + e)?)
+    Some(member) => match FileOperationPatternKind.from_json(member) {
+      Ok(known) => Some(known)
+      Err(_) => Option.None
+    }
     Option.None => Option.None
   }
   let f_options = match value.get("options") {
@@ -3695,7 +3706,10 @@ fn InitializeParams.from_json(value: Json) -> Result<InitializeParams, Text> {
     Option.None => Option.None
   }
   let f_trace = match value.get("trace") {
-    Some(member) => Some(TraceValues.from_json(member).map_err(|e| "InitializeParams.trace" + ": " + e)?)
+    Some(member) => match TraceValues.from_json(member) {
+      Ok(known) => Some(known)
+      Err(_) => Option.None
+    }
     Option.None => Option.None
   }
   let f_workspace_folders = match value.get("workspaceFolders") {
@@ -5196,7 +5210,10 @@ fn RenameClientCapabilities.from_json(value: Json) -> Result<RenameClientCapabil
     Option.None => Option.None
   }
   let f_prepare_support_default_behavior = match value.get("prepareSupportDefaultBehavior") {
-    Some(member) => Some(PrepareSupportDefaultBehavior.from_json(member).map_err(|e| "RenameClientCapabilities.prepareSupportDefaultBehavior" + ": " + e)?)
+    Some(member) => match PrepareSupportDefaultBehavior.from_json(member) {
+      Ok(known) => Some(known)
+      Err(_) => Option.None
+    }
     Option.None => Option.None
   }
   let f_honors_change_annotations = match value.get("honorsChangeAnnotations") {
@@ -7053,7 +7070,10 @@ fn TextDocumentSyncOptions.from_json(value: Json) -> Result<TextDocumentSyncOpti
     Option.None => Option.None
   }
   let f_change = match value.get("change") {
-    Some(member) => Some(TextDocumentSyncKind.from_json(member).map_err(|e| "TextDocumentSyncOptions.change" + ": " + e)?)
+    Some(member) => match TextDocumentSyncKind.from_json(member) {
+      Ok(known) => Some(known)
+      Err(_) => Option.None
+    }
     Option.None => Option.None
   }
   let f_will_save = match value.get("willSave") {
@@ -7559,7 +7579,10 @@ fn WorkspaceEditClientCapabilities.from_json(value: Json) -> Result<WorkspaceEdi
     Option.None => Option.None
   }
   let f_failure_handling = match value.get("failureHandling") {
-    Some(member) => Some(FailureHandlingKind.from_json(member).map_err(|e| "WorkspaceEditClientCapabilities.failureHandling" + ": " + e)?)
+    Some(member) => match FailureHandlingKind.from_json(member) {
+      Ok(known) => Some(known)
+      Err(_) => Option.None
+    }
     Option.None => Option.None
   }
   let f_normalizes_line_endings = match value.get("normalizesLineEndings") {

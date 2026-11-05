@@ -7,7 +7,9 @@
 //!
 //! - structure: a record, `extends` then `mixins` then its own properties flattened in that
 //!   order (a redeclared property keeps its first position and takes the last type); an
-//!   optional property is an `Option` defaulting to `None`;
+//!   optional property is an `Option` defaulting to `None`; an optional property of an
+//!   enumeration without custom values decodes a value it does not know as `None`, and a list
+//!   of one skips such a value (LSP 3.17, "Enumerations"); a required one is refused;
 //! - enumeration: an enum, one variant per value, encoded as its wire value (string or
 //!   integer); an enumeration with `supportsCustomValues` gets a `Custom(Text)` or
 //!   `Custom(Int)` variant that keeps any other value;
@@ -912,7 +914,14 @@ impl<'a> Gen<'a> {
                 field.ident,
                 lit(&field.wire)
             );
-            if field.optional {
+            if field.optional && self.closed_enumeration(&field.ir) {
+                let e = self.ty_text(&field.ir);
+                let _ = writeln!(out, "    Some(member) => match {e}.from_json(member) {{");
+                let _ = writeln!(out, "      Ok(known) => Some(known)");
+                let _ = writeln!(out, "      Err(_) => Option.None");
+                let _ = writeln!(out, "    }}");
+                let _ = writeln!(out, "    Option.None => Option.None");
+            } else if field.optional {
                 let _ = writeln!(out, "    Some(member) => Some({decode}?)");
                 let _ = writeln!(out, "    Option.None => Option.None");
             } else {
@@ -1384,7 +1393,18 @@ pub fn generate_with_types(
     for line in SELECTION_RULE {
         let _ = writeln!(out, "// {line}");
     }
-    let _ = writeln!(out, "// Decoding ignores members it does not know.");
+    let _ = writeln!(
+        out,
+        "// Decoding ignores members it does not know. An enumeration without custom"
+    );
+    let _ = writeln!(
+        out,
+        "// values tolerates a value it does not know (LSP 3.17, \"Enumerations\"): a list"
+    );
+    let _ = writeln!(
+        out,
+        "// skips it, an optional property holding it is absent; a required one is refused."
+    );
     let _ = writeln!(out);
     out.push_str(&consts);
     for texts in sections.values() {

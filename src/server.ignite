@@ -36,10 +36,11 @@ import examples.lsp.lsp_types.{
 // picks another build.
 //
 // Closed enumerations in client capabilities: the generator decodes a list of a closed
-// enumeration by skipping the values it does not know (LSP 3.17, "Enumerations"), so a
-// `valueSet` naming a value newer than 3.17 still decodes and `initialize` succeeds. A single
-// closed value the server does not know still fails the decode; `initialize` then answers
-// InvalidParams with the decoder's message and the server stays uninitialized.
+// enumeration by skipping the values it does not know and an optional property holding one
+// as absent (LSP 3.17, "Enumerations"), so a `valueSet` or a `failureHandling` naming a value
+// newer than 3.17 still decodes and `initialize` succeeds. Params that still do not decode
+// (a required closed value it does not know, a wrong JSON kind) make `initialize` answer
+// InvalidParams with the decoder's message, and the server stays uninitialized.
 
 // ---- the executable ---------------------------------------------------------------------
 
@@ -711,6 +712,21 @@ test "an initialize whose valueSet names unknown values of a closed enumeration 
   let newer = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"processId":null,"rootUri":null,"capabilities":{"textDocument":{"publishDiagnostics":{"tagSupport":{"valueSet":[1,2,3]}},"documentSymbol":{"symbolKind":{"valueSet":[1,26,27,99]}}}}}}"#
   let (_, replies) = exchange([newer, EXIT], quiet())?
   assert replies == [CAPABILITIES_UTF16]
+}
+
+// `failureHandling` (FailureHandlingKind), `prepareSupportDefaultBehavior`
+// (PrepareSupportDefaultBehavior, only 1) and `trace` (TraceValues) are optional closed
+// enumerations: a value 3.17 does not define is decoded as absent.
+test "an initialize with an unknown value of an optional closed enumeration still succeeds" {
+  let failure = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"processId":null,"rootUri":null,"capabilities":{"workspace":{"workspaceEdit":{"failureHandling":"retry"}}}}}"#
+  let (_, first) = exchange([failure, EXIT], quiet())?
+  assert first == [CAPABILITIES_UTF16]
+  let rename = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"processId":null,"rootUri":null,"capabilities":{"textDocument":{"rename":{"prepareSupportDefaultBehavior":2}}}}}"#
+  let (_, second) = exchange([rename, EXIT], quiet())?
+  assert second == [CAPABILITIES_UTF16]
+  let trace = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"processId":null,"rootUri":null,"capabilities":{},"trace":"bogus"}}"#
+  let (_, third) = exchange([trace, EXIT], quiet())?
+  assert third == [CAPABILITIES_UTF16]
 }
 
 test "an initialize whose params do not decode is InvalidParams and the server stays uninitialized" {
