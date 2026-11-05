@@ -10,7 +10,7 @@ import examples.lsp.lsp_types.{
   DidChangeTextDocumentParams, DidCloseTextDocumentParams, PublishDiagnosticsParams, CancelParams,
   CancelParamsId, TextDocumentContentChangeEvent, ServerCapabilitiesSemanticTokensProvider,
   ServerCapabilitiesTextDocumentSync, TextDocumentSyncKind, DiagnosticCode, DiagnosticSeverity,
-  Position, PositionEncodingKind, TraceValues
+  Position, PositionEncodingKind, TraceValues, DocumentFilter
 }
 
 // Round trips of the generated LSP types (`lsp_types.ignite`, story:lsp-types): for each root
@@ -280,4 +280,45 @@ test "a value of the wrong shape is refused with its place" {
   assert Position.from_json(parse(r#"{"line": 1}"#)?) == Err("Position.character: missing")
   assert CancelParams.from_json(parse(r#"{"id": true}"#)?) == Err("CancelParams.id: CancelParamsId: matches none of Integer, String")
   assert DidCloseTextDocumentParams.from_json(parse("[]")?) == Err("DidCloseTextDocumentParams: expected an object")
+}
+
+// ---- adversary cases (review of story:lsp-types) ----------------------------------------
+
+// TextDocumentContentChangeEvent is `{range, rangeLength?, text} | {text}`. An incremental
+// change whose range does not decode must be refused: falling through to the `{text}` arm
+// turns it into a full-document replacement, and a server applying it replaces the whole
+// buffer with the fragment.
+test "adversary: an incremental change with a bad range is refused, not read as a full replacement" {
+  var wrong: List<Text> = []
+  for text in [
+    r#"{"range": {"start": {"line": 0, "character": -1}, "end": {"line": 0, "character": 0}}, "text": "x"}"#,
+    r#"{"range": {"start": {"line": 2147483648, "character": 0}, "end": {"line": 0, "character": 0}}, "text": "x"}"#,
+    r#"{"range": {"start": {"line": 0}, "end": {"line": 0, "character": 0}}, "text": "x"}"#,
+    r#"{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}, "rangeLength": -1, "text": "x"}"#,
+    r#"{"range": "0:0-0:1", "text": "x"}"#
+  ] {
+    match TextDocumentContentChangeEvent.from_json(parse(text)?) {
+      Err(_) => {}
+      Ok(other) => wrong.push("{text} decoded as {other.debug()}")
+    }
+  }
+  assert wrong == [], "accepted: {wrong.debug()}"
+}
+
+// The same fall-through in other unions: a malformed member of the more specific arm drops
+// that arm and a looser one, which ignores the member, accepts the value; the member is lost
+// and the value does not re-encode equal.
+test "adversary: a malformed member of the specific arm is refused, not dropped by a looser arm" {
+  var wrong: List<Text> = []
+  let tokens = parse(r#"{"legend": {"tokenTypes": [], "tokenModifiers": []}, "documentSelector": [{"language": 5}]}"#)?
+  match ServerCapabilitiesSemanticTokensProvider.from_json(tokens) {
+    Err(_) => {}
+    Ok(other) => wrong.push("documentSelector dropped: {other.debug()}")
+  }
+  let filter = parse(r#"{"notebook": 5, "language": "rust"}"#)?
+  match DocumentFilter.from_json(filter) {
+    Err(_) => {}
+    Ok(other) => wrong.push("notebook dropped: {other.debug()}")
+  }
+  assert wrong == [], "accepted: {wrong.debug()}"
 }
