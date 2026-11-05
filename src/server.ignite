@@ -352,25 +352,45 @@ fn hex_value(b: Byte) -> Option<Int> {
   }
 }
 
-// The position of byte `offset` of `text`: its line (lines end at LF, CR LF or CR) and its
-// character, counted in `encoding`'s units from the line's start: bytes for UTF-8, UTF-16 code
-// units otherwise (one for a character of one to three UTF-8 bytes, two for one of four). An
-// offset past the end is the end.
-fn position_at(text: Text, offset: Int, encoding: Encoding) -> Position {
-  let bytes = text.to_bytes()
-  let end = if offset > bytes.len() { bytes.len() } else if offset < 0 { 0 } else { offset }
-  var line = 0
-  var start = 0
+// The byte offset of each line's start in `bytes`: 0, then the byte after each LF, CR LF or
+// lone CR. One pass; the positions of a check's diagnostics are looked up in it.
+fn line_starts(bytes: Bytes) -> List<Int> {
+  var starts = [0]
+  let size = bytes.len()
   var at = 0
-  while at < end {
+  while at < size {
     let b = bytes.at(at)
-    if b == b'\n' || (b == b'\r' && !(at + 1 < bytes.len() && bytes.at(at + 1) == b'\n')) {
-      line = line + 1
-      start = at + 1
+    if b == b'\n' || (b == b'\r' && !(at + 1 < size && bytes.at(at + 1) == b'\n')) {
+      starts.push(at + 1)
     }
     at = at + 1
   }
-  Position { line, character = units(bytes, start, end, encoding) }
+  starts
+}
+
+// The position of byte `offset` of `bytes`, whose lines start at `starts` (`line_starts`):
+// its line, found by binary search, and its character, counted in `encoding`'s units from the
+// line's start: bytes for UTF-8, UTF-16 code units otherwise (one for a character of one to
+// three UTF-8 bytes, two for one of four). An offset past the end is the end.
+fn position_in(bytes: Bytes, starts: List<Int>, offset: Int, encoding: Encoding) -> Position {
+  let end = if offset > bytes.len() { bytes.len() } else if offset < 0 { 0 } else { offset }
+  var low = 0
+  var high = starts.len() - 1
+  while low < high {
+    let middle = (low + high + 1) / 2
+    if starts.at(middle) <= end {
+      low = middle
+    } else {
+      high = middle - 1
+    }
+  }
+  Position { line = low, character = units(bytes, starts.at(low), end, encoding) }
+}
+
+// The position of byte `offset` of `text` (`position_in`).
+fn position_at(text: Text, offset: Int, encoding: Encoding) -> Position {
+  let bytes = text.to_bytes()
+  position_in(bytes, line_starts(bytes), offset, encoding)
 }
 
 fn units(bytes: Bytes, from: Int, to: Int, encoding: Encoding) -> Int = match encoding {
@@ -399,15 +419,16 @@ fn offset_of(item: Json, name: Text) -> Option<Int> = match item.get(name) {
 
 // One diagnostic of `ignite check --json`'s output: a record of the checked file at its
 // range, one of another file (a sibling module or the standard library) at the document's
-// start with that file's path in front of its message.
-fn diagnostic_of(item: Json, path: Text, source: Text, encoding: Encoding) -> Option<Diagnostic> {
+// start with that file's path in front of its message. `bytes` is the checked text, `starts`
+// its `line_starts`.
+fn diagnostic_of(item: Json, path: Text, bytes: Bytes, starts: List<Int>, encoding: Encoding) -> Option<Diagnostic> {
   let (code, message, file) = match (item.text("code"), item.text("message"), item.text("path")) {
     (Some(code), Some(message), Some(file)) => (code, message, file)
     _ => return None
   }
   let range = if file == path {
     match (offset_of(item, "start"), offset_of(item, "end")) {
-      (Some(start), Some(end)) => Range { start = position_at(source, start, encoding), end = position_at(source, end, encoding) }
+      (Some(start), Some(end)) => Range { start = position_in(bytes, starts, start, encoding), end = position_in(bytes, starts, end, encoding) }
       _ => return None
     }
   } else {
@@ -430,7 +451,8 @@ fn trouble(message: Text) -> Diagnostic = Diagnostic {
   message
 }
 
-// The diagnostics of `output`, the output of `ignite check --json` for `path`.
+// The diagnostics of `output`, the output of `ignite check --json` for `path`, whose text is
+// `text`: one pass over `text` for its line starts, then a lookup per position.
 fn diagnostics_in(output: Text, path: Text, text: Text, encoding: Encoding) -> List<Diagnostic> {
   let items = match parse(output) {
     Ok(value) => match value.get("diagnostics") {
@@ -439,9 +461,11 @@ fn diagnostics_in(output: Text, path: Text, text: Text, encoding: Encoding) -> L
     }
     Err(_) => return [trouble("ignite check printed no JSON")]
   }
+  let bytes = text.to_bytes()
+  let starts = line_starts(bytes)
   var out = []
   for item in items {
-    match diagnostic_of(item, path, text, encoding) {
+    match diagnostic_of(item, path, bytes, starts, encoding) {
       Some(diagnostic) => out.push(diagnostic)
       None => {}
     }
@@ -449,13 +473,18 @@ fn diagnostics_in(output: Text, path: Text, text: Text, encoding: Encoding) -> L
   out
 }
 
-// `text` checked as the file at `path` by `checker`: the buffer is the compiler's stdin.
+// `text` checked as the file at `path` by `checker`: the buffer is the compiler's stdin. Its
+// output is kept up to `Launcher`'s largest limit, 16 MiB (about 60,000 diagnostics); an
+// output cut there is one diagnostic saying so.
 fn check(checker: Checker, path: Text, text: Text, encoding: Encoding) -> List<Diagnostic> requires [checker.*] {
   var arguments = checker.prefix
   arguments.append(["check", "--json", "--stdin-for", path])
-  let invocation = Invocation { program = checker.program, arguments, input = text.to_bytes(), timeout = 30 seconds }
+  let limit = 16 MiB
+  let invocation = Invocation { program = checker.program, arguments, input = text.to_bytes(), timeout = 30 seconds, output_limit = limit }
   match checker.tools.execute(invocation) {
-    Ok(exit) => if exit.ending == 0 && (exit.code == 0 || exit.code == 1) {
+    Ok(exit) => if exit.dropped > 0 && exit.stdout.len() >= limit.to_int() {
+      [trouble("ignite check printed more than 16 MiB; {exit.dropped} bytes were dropped, so its diagnostics are lost")]
+    } else if exit.ending == 0 && (exit.code == 0 || exit.code == 1) {
       diagnostics_in(exit.stdout.to_text(), path, text, encoding)
     } else {
       [trouble("ignite check ended with {exit.ending}/{exit.code}: {exit.stderr.to_text()}")]
@@ -847,6 +876,60 @@ test "a compiler that cannot run is one diagnostic saying why" {
   assert diagnostics.len() == 1
   assert diagnostics[0].message == "ignite check did not run: program not found: /nonexistent/ignite"
   assert diagnostics[0].source == Some("ignite-lsp")
+}
+
+// A checker whose output is one diagnostic of the checked file at bytes 0 to 1 with a
+// message of `size` bytes of `x`.
+test fn verbose(size: Int) -> Checker = Checker {
+  tools = Launcher.new()
+  program = "/bin/sh"
+  prefix = [
+    "-c",
+    r#"printf '{"diagnostics":[{"code":"E040","message":"'; head -c "$0" /dev/zero | tr '\000' x; printf '","path":"%s","start":{"offset":0},"end":{"offset":1}}]}\n' "$4""#,
+    size.to_text()
+  ]
+}
+
+test "an output over a mebibyte still gives its diagnostics" {
+  let diagnostics = check(verbose(2097152), "/w/a.ignite", "x", Utf16)
+  assert diagnostics.len() == 1
+  assert diagnostics[0].source == Some("ignite")
+  assert diagnostics[0].message.len() == 2097152
+}
+
+test "an output past the limit is one diagnostic that says it was cut off" {
+  let diagnostics = check(verbose(17825792), "/w/a.ignite", "x", Utf16)
+  assert diagnostics.len() == 1
+  assert diagnostics[0].source == Some("ignite-lsp")
+  assert diagnostics[0].message.starts_with("ignite check printed more than 16 MiB; ")
+}
+
+// One diagnostic of `/w/a.ignite` at bytes `start` to `end`, as `ignite check --json` prints it.
+test fn located(start: Int, end: Int) -> Text =
+  r#"{"code":"E040","message":"m","path":"/w/a.ignite","start":{"offset":"#.concat(start.to_text()).concat(r#"},"end":{"offset":"#).concat(end.to_text()).concat(r"}}")
+
+// 40,000 lines (1.1 MB) with a diagnostic on every 40th: the positions come from one pass
+// over the document, not one per diagnostic (16 to 22 s before, on both targets).
+test "a thousand diagnostics on a megabyte document are placed in one pass over it" {
+  var lines: List<Text> = []
+  var items: List<Text> = []
+  var offset = 0
+  var index = 0
+  while index < 40000 {
+    let line = "fn f{index}() -> Int = {index}\n"
+    if index % 40 == 39 {
+      items.push(located(offset + 3, offset + 4))
+    }
+    lines.push(line)
+    offset = offset + line.len()
+    index = index + 1
+  }
+  let output = r#"{"diagnostics":["#.concat(items.join(",")).concat(r"]}")
+  let started = Clock.monotonic()
+  let found = diagnostics_in(output, "/w/a.ignite", lines.join(""), Utf16)
+  assert Clock.monotonic() - started < 5 seconds
+  assert found.len() == 1000
+  assert found[999].range == Range { start = Position { line = 39999, character = 3 }, end = Position { line = 39999, character = 4 } }
 }
 
 test "a diagnostic of another file is placed at the start with its path" {
