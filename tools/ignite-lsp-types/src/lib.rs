@@ -39,7 +39,8 @@ use model::{Enumeration, MetaModel, Property, Type, Value};
 /// The order in which a union's arms are tried when decoding: by class, and within a class
 /// in the meta model's order. A structure arm with more required properties is tried before
 /// one with fewer, then more properties before fewer, so a structure that extends another is
-/// tried before its base. The first arm that decodes wins.
+/// tried before its base. The first arm the value selects decodes it, and that decode's
+/// result is the union's: see [`SELECTION_RULE`].
 pub const SHAPE_ORDER: &[&str] = &[
     "string literals",
     "enumerations without custom values",
@@ -52,6 +53,19 @@ pub const SHAPE_ORDER: &[&str] = &[
     "maps",
     "unions",
     "LSPAny, LSPObject, LSPArray",
+];
+
+/// How decoding commits to a union arm, written into the module header. A structure arm whose
+/// decode fails must not fall through to a looser arm: an incremental text change with a bad
+/// range would otherwise decode as a full replacement.
+pub const SELECTION_RULE: &[&str] = &[
+    "Decoding commits to the first arm, in that order, that the value selects: a",
+    "structure or literal arm when the value is an object with a member for every",
+    "required property (null counts as present); a string literal arm when the value",
+    "is that string; a union arm when the value selects one of its arms; any other",
+    "arm when the value has its JSON kind (string, number, boolean, array, object).",
+    "The selected arm's decode error is the union's error; a later arm is tried only",
+    "when the value does not select an earlier one.",
 ];
 
 /// Why no module was written.
@@ -199,6 +213,10 @@ struct Gen<'a> {
     items: BTreeMap<String, Item>,
     helpers: BTreeMap<String, String>,
     bases: BTreeSet<&'static str>,
+    /// The type aliases being lowered, each with the `depth` it was entered at.
+    open_aliases: BTreeMap<String, usize>,
+    /// How many structures, literals and `or` arms enclose the type being lowered.
+    depth: usize,
 }
 
 fn refuse<T>(message: String) -> Result<T, Error> {
@@ -360,7 +378,9 @@ impl<'a> Gen<'a> {
                     return Ok(Ir::Named(name));
                 }
                 self.register(&name, Item::Pending(origin.clone()))?;
+                self.depth += 1;
                 let fields = self.fields(&name, properties, &name, &origin)?;
+                self.depth -= 1;
                 self.register(&name, Item::Record(origin, fields))?;
                 Ok(Ir::Named(name))
             }
@@ -390,6 +410,7 @@ impl<'a> Gen<'a> {
                 }
                 self.register(&name, Item::Pending(origin.clone()))?;
                 let mut lowered = Vec::new();
+                self.depth += 1;
                 for (index, arm) in others.iter().enumerate() {
                     let arm_hint = format!("{name}Literal{}", index + 1);
                     let arm_origin = format!("{origin} arm {}", index + 1);
@@ -407,6 +428,7 @@ impl<'a> Gen<'a> {
                     }
                     lowered.push(Arm { variant, ir });
                 }
+                self.depth -= 1;
                 self.register(&name, Item::Union(origin, lowered))?;
                 Ir::Named(name)
             }
@@ -436,6 +458,7 @@ impl<'a> Gen<'a> {
             let origin = format!("structures/{name}");
             self.register(name, Item::Pending(origin.clone()))?;
             let properties = self.flatten(name, &mut Vec::new())?;
+            self.depth += 1;
             let mut fields = Vec::new();
             let mut seen = BTreeSet::new();
             for (owner, property) in properties {
@@ -450,6 +473,7 @@ impl<'a> Gen<'a> {
                 }
                 fields.push(field);
             }
+            self.depth -= 1;
             self.register(name, Item::Record(origin, fields))?;
             return Ok(Ir::Named(name.to_string()));
         }
@@ -458,8 +482,25 @@ impl<'a> Gen<'a> {
             return Ok(Ir::Named(name.to_string()));
         }
         if let Some(alias) = model.aliases.iter().find(|a| a.name == name) {
+            let from = origin;
             let origin = format!("typeAliases/{name}");
-            let ir = self.lower(&alias.ty, name, &origin)?;
+            if let Some(&entered) = self.open_aliases.get(name) {
+                if entered == self.depth {
+                    return refuse(format!(
+                        "type alias `{name}` contains itself with no structure or `or` between (reached again from {from})"
+                    ));
+                }
+                let ir = self.lower(&alias.ty, name, &origin)?;
+                return Ok(if ir == Ir::Named(name.to_string()) {
+                    ir
+                } else {
+                    Ir::Alias(name.to_string(), Box::new(ir))
+                });
+            }
+            self.open_aliases.insert(name.to_string(), self.depth);
+            let lowered = self.lower(&alias.ty, name, &origin);
+            self.open_aliases.remove(name);
+            let ir = lowered?;
             if ir == Ir::Named(name.to_string()) {
                 return Ok(ir);
             }
@@ -960,20 +1001,36 @@ impl<'a> Gen<'a> {
         let _ = writeln!(out, "}}");
         let _ = writeln!(out);
         let names: Vec<&str> = order.iter().map(|(_, a)| a.variant.as_str()).collect();
+        let selections: Vec<String> = order
+            .iter()
+            .map(|(_, arm)| self.selects(&arm.ir, "value"))
+            .collect();
         let _ = writeln!(
             out,
-            "// Decoded by shape, the first arm that decodes wins: {}.",
+            "// Whether a value selects an arm of `{name}`: the JSON kind of one, or every required member of a structure arm."
+        );
+        let _ = writeln!(
+            out,
+            "fn {name}.selects(value: Json) -> Bool = {}",
+            selections.join(" || ")
+        );
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: {}.",
             names.join(", then ")
         );
         let _ = writeln!(
             out,
             "fn {name}.from_json(value: Json) -> Result<{name}, Text> {{"
         );
-        for (_, arm) in &order {
+        for ((_, arm), selection) in order.iter().zip(&selections) {
             let decode = self.decode(&arm.ir, "value", &lit(name));
-            let _ = writeln!(out, "  match {decode} {{");
-            let _ = writeln!(out, "    Ok(arm) => return Ok({name}.{}(arm))", arm.variant);
-            let _ = writeln!(out, "    Err(_) => {{}}");
+            let _ = writeln!(out, "  if {selection} {{");
+            let _ = writeln!(out, "    return match {decode} {{");
+            let _ = writeln!(out, "      Ok(arm) => Ok({name}.{}(arm))", arm.variant);
+            let _ = writeln!(out, "      Err(e) => Err(e)");
+            let _ = writeln!(out, "    }}");
             let _ = writeln!(out, "  }}");
         }
         let _ = writeln!(
@@ -983,6 +1040,48 @@ impl<'a> Gen<'a> {
         );
         let _ = writeln!(out, "}}");
         out
+    }
+
+    /// A `Bool` expression: whether the `Json` expression `value` selects an arm of type
+    /// `ir`. A structure or literal arm is selected when the value is an object holding every
+    /// required member; a string literal arm when the value is that string; a union arm when
+    /// the value selects one of its arms; any other arm when the value has its JSON kind.
+    fn selects(&mut self, ir: &Ir, value: &str) -> String {
+        match ir {
+            Ir::Text => self.predicate("is_string", value),
+            Ir::Int | Ir::UInt | Ir::Decimal => self.predicate("is_number", value),
+            Ir::Bool => self.predicate("is_bool", value),
+            Ir::List(_) => self.predicate("is_array", value),
+            Ir::Map(_) => self.predicate("is_object", value),
+            Ir::Unit | Ir::Option(_) => self.predicate("is_null", value),
+            Ir::Json => "true".into(),
+            Ir::Literal(text) => format!("{value} == Json.Str({})", lit(text)),
+            Ir::Alias(_, target) => self.selects(&target.clone(), value),
+            Ir::Named(n) => match self.items.get(n).cloned() {
+                Some(Item::Enum(_, e)) if e.base == "string" => self.predicate("is_string", value),
+                Some(Item::Enum(..)) => self.predicate("is_number", value),
+                Some(Item::Record(_, fields)) => {
+                    let required: Vec<String> = fields
+                        .iter()
+                        .filter(|f| !f.optional)
+                        .map(|f| lit(&f.wire))
+                        .collect();
+                    if required.is_empty() {
+                        self.predicate("is_object", value)
+                    } else {
+                        self.bases.insert("has_members");
+                        self.bases.insert("is_object");
+                        format!("has_members({value}, [{}])", required.join(", "))
+                    }
+                }
+                _ => format!("{n}.selects({value})"),
+            },
+        }
+    }
+
+    fn predicate(&mut self, name: &'static str, value: &str) -> String {
+        self.bases.insert(name);
+        format!("{name}({value})")
     }
 
     fn emit_base(name: &str) -> &'static str {
@@ -998,6 +1097,27 @@ impl<'a> Gen<'a> {
             }
             "decode_bool" => {
                 "// A JSON boolean.\nfn decode_bool(value: Json, at: Text) -> Result<Bool, Text> = match value {\n  Json.Bool(b) => Ok(b)\n  _ => Err(at + \": expected a boolean\")\n}\n"
+            }
+            "is_string" => {
+                "// Whether a value is a JSON string.\nfn is_string(value: Json) -> Bool = match value {\n  Json.Str(_) => true\n  _ => false\n}\n"
+            }
+            "is_number" => {
+                "// Whether a value is a JSON number.\nfn is_number(value: Json) -> Bool = match value {\n  Json.Number(_) => true\n  Json.Decimal(_) => true\n  _ => false\n}\n"
+            }
+            "is_bool" => {
+                "// Whether a value is a JSON boolean.\nfn is_bool(value: Json) -> Bool = match value {\n  Json.Bool(_) => true\n  _ => false\n}\n"
+            }
+            "is_array" => {
+                "// Whether a value is a JSON array.\nfn is_array(value: Json) -> Bool = match value {\n  Json.Array(_) => true\n  _ => false\n}\n"
+            }
+            "is_object" => {
+                "// Whether a value is a JSON object.\nfn is_object(value: Json) -> Bool = match value {\n  Json.Object(_) => true\n  _ => false\n}\n"
+            }
+            "is_null" => {
+                "// Whether a value is JSON null.\nfn is_null(value: Json) -> Bool = value == Json.Null\n"
+            }
+            "has_members" => {
+                "// Whether a value is a JSON object with a member of each of `names`, null or not.\nfn has_members(value: Json, names: List<Text>) -> Bool {\n  if !is_object(value) {\n    return false\n  }\n  for name in names {\n    if value.get(name) == Option.None {\n      return false\n    }\n  }\n  true\n}\n"
             }
             "decode_json" => {
                 "// Any JSON value (`LSPAny`, `LSPObject`, `LSPArray`); `at` is unused, every value is one.\nfn decode_json(value: Json, at: Text) -> Result<Json, Text> = Ok(value)\n"
@@ -1073,6 +1193,8 @@ pub fn generate(text: &str, roots: &[String], package: &str) -> Result<String, E
         items: BTreeMap::new(),
         helpers: BTreeMap::new(),
         bases: BTreeSet::new(),
+        open_aliases: BTreeMap::new(),
+        depth: 0,
     };
     let mut consts = String::new();
     for root in roots {
@@ -1196,10 +1318,10 @@ pub fn generate(text: &str, roots: &[String], package: &str) -> Result<String, E
         let end = if i + 1 == SHAPE_ORDER.len() { "." } else { ";" };
         let _ = writeln!(out, "//   {}. {class}{end}", i + 1);
     }
-    let _ = writeln!(
-        out,
-        "// The first arm that decodes wins. Decoding ignores members it does not know."
-    );
+    for line in SELECTION_RULE {
+        let _ = writeln!(out, "// {line}");
+    }
+    let _ = writeln!(out, "// Decoding ignores members it does not know.");
     let _ = writeln!(out);
     out.push_str(&consts);
     for texts in sections.values() {

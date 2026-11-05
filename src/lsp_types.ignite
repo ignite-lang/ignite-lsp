@@ -24,7 +24,14 @@ import std.result.map_err
 //   9. maps;
 //   10. unions;
 //   11. LSPAny, LSPObject, LSPArray.
-// The first arm that decodes wins. Decoding ignores members it does not know.
+// Decoding commits to the first arm, in that order, that the value selects: a
+// structure or literal arm when the value is an object with a member for every
+// required property (null counts as present); a string literal arm when the value
+// is that string; a union arm when the value selects one of its arms; any other
+// arm when the value has its JSON kind (string, number, boolean, array, object).
+// The selected arm's decode error is the union's error; a later arm is tried only
+// when the value does not select an earlier one.
+// Decoding ignores members it does not know.
 
 // metaModel: requests/initialize (params InitializeParams, result InitializeResult)
 const METHOD_INITIALIZE: Text = "initialize"
@@ -7778,15 +7785,22 @@ fn CancelParamsId.to_json(value: CancelParamsId) -> Json = match value {
   CancelParamsId.String(arm) => Json.Str(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Integer, then String.
+// Whether a value selects an arm of `CancelParamsId`: the JSON kind of one, or every required member of a structure arm.
+fn CancelParamsId.selects(value: Json) -> Bool = is_number(value) || is_string(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Integer, then String.
 fn CancelParamsId.from_json(value: Json) -> Result<CancelParamsId, Text> {
-  match decode_int(value, "CancelParamsId") {
-    Ok(arm) => return Ok(CancelParamsId.Integer(arm))
-    Err(_) => {}
+  if is_number(value) {
+    return match decode_int(value, "CancelParamsId") {
+      Ok(arm) => Ok(CancelParamsId.Integer(arm))
+      Err(e) => Err(e)
+    }
   }
-  match decode_text(value, "CancelParamsId") {
-    Ok(arm) => return Ok(CancelParamsId.String(arm))
-    Err(_) => {}
+  if is_string(value) {
+    return match decode_text(value, "CancelParamsId") {
+      Ok(arm) => Ok(CancelParamsId.String(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("CancelParamsId: matches none of Integer, String")
 }
@@ -7803,15 +7817,22 @@ fn DiagnosticCode.to_json(value: DiagnosticCode) -> Json = match value {
   DiagnosticCode.String(arm) => Json.Str(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Integer, then String.
+// Whether a value selects an arm of `DiagnosticCode`: the JSON kind of one, or every required member of a structure arm.
+fn DiagnosticCode.selects(value: Json) -> Bool = is_number(value) || is_string(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Integer, then String.
 fn DiagnosticCode.from_json(value: Json) -> Result<DiagnosticCode, Text> {
-  match decode_int(value, "DiagnosticCode") {
-    Ok(arm) => return Ok(DiagnosticCode.Integer(arm))
-    Err(_) => {}
+  if is_number(value) {
+    return match decode_int(value, "DiagnosticCode") {
+      Ok(arm) => Ok(DiagnosticCode.Integer(arm))
+      Err(e) => Err(e)
+    }
   }
-  match decode_text(value, "DiagnosticCode") {
-    Ok(arm) => return Ok(DiagnosticCode.String(arm))
-    Err(_) => {}
+  if is_string(value) {
+    return match decode_text(value, "DiagnosticCode") {
+      Ok(arm) => Ok(DiagnosticCode.String(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("DiagnosticCode: matches none of Integer, String")
 }
@@ -7828,15 +7849,22 @@ fn DocumentFilter.to_json(value: DocumentFilter) -> Json = match value {
   DocumentFilter.NotebookCellTextDocumentFilter(arm) => NotebookCellTextDocumentFilter.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: NotebookCellTextDocumentFilter, then TextDocumentFilter.
+// Whether a value selects an arm of `DocumentFilter`: the JSON kind of one, or every required member of a structure arm.
+fn DocumentFilter.selects(value: Json) -> Bool = has_members(value, ["notebook"]) || TextDocumentFilter.selects(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: NotebookCellTextDocumentFilter, then TextDocumentFilter.
 fn DocumentFilter.from_json(value: Json) -> Result<DocumentFilter, Text> {
-  match NotebookCellTextDocumentFilter.from_json(value).map_err(|e| "DocumentFilter" + ": " + e) {
-    Ok(arm) => return Ok(DocumentFilter.NotebookCellTextDocumentFilter(arm))
-    Err(_) => {}
+  if has_members(value, ["notebook"]) {
+    return match NotebookCellTextDocumentFilter.from_json(value).map_err(|e| "DocumentFilter" + ": " + e) {
+      Ok(arm) => Ok(DocumentFilter.NotebookCellTextDocumentFilter(arm))
+      Err(e) => Err(e)
+    }
   }
-  match TextDocumentFilter.from_json(value).map_err(|e| "DocumentFilter" + ": " + e) {
-    Ok(arm) => return Ok(DocumentFilter.TextDocumentFilter(arm))
-    Err(_) => {}
+  if TextDocumentFilter.selects(value) {
+    return match TextDocumentFilter.from_json(value).map_err(|e| "DocumentFilter" + ": " + e) {
+      Ok(arm) => Ok(DocumentFilter.TextDocumentFilter(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("DocumentFilter: matches none of NotebookCellTextDocumentFilter, TextDocumentFilter")
 }
@@ -7853,15 +7881,22 @@ fn NotebookCellTextDocumentFilterNotebook.to_json(value: NotebookCellTextDocumen
   NotebookCellTextDocumentFilterNotebook.NotebookDocumentFilter(arm) => NotebookDocumentFilter.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: String, then NotebookDocumentFilter.
+// Whether a value selects an arm of `NotebookCellTextDocumentFilterNotebook`: the JSON kind of one, or every required member of a structure arm.
+fn NotebookCellTextDocumentFilterNotebook.selects(value: Json) -> Bool = is_string(value) || NotebookDocumentFilter.selects(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: String, then NotebookDocumentFilter.
 fn NotebookCellTextDocumentFilterNotebook.from_json(value: Json) -> Result<NotebookCellTextDocumentFilterNotebook, Text> {
-  match decode_text(value, "NotebookCellTextDocumentFilterNotebook") {
-    Ok(arm) => return Ok(NotebookCellTextDocumentFilterNotebook.String(arm))
-    Err(_) => {}
+  if is_string(value) {
+    return match decode_text(value, "NotebookCellTextDocumentFilterNotebook") {
+      Ok(arm) => Ok(NotebookCellTextDocumentFilterNotebook.String(arm))
+      Err(e) => Err(e)
+    }
   }
-  match NotebookDocumentFilter.from_json(value).map_err(|e| "NotebookCellTextDocumentFilterNotebook" + ": " + e) {
-    Ok(arm) => return Ok(NotebookCellTextDocumentFilterNotebook.NotebookDocumentFilter(arm))
-    Err(_) => {}
+  if NotebookDocumentFilter.selects(value) {
+    return match NotebookDocumentFilter.from_json(value).map_err(|e| "NotebookCellTextDocumentFilterNotebook" + ": " + e) {
+      Ok(arm) => Ok(NotebookCellTextDocumentFilterNotebook.NotebookDocumentFilter(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("NotebookCellTextDocumentFilterNotebook: matches none of String, NotebookDocumentFilter")
 }
@@ -7880,19 +7915,28 @@ fn NotebookDocumentFilter.to_json(value: NotebookDocumentFilter) -> Json = match
   NotebookDocumentFilter.NotebookDocumentFilterLiteral3(arm) => NotebookDocumentFilterLiteral3.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: NotebookDocumentFilterLiteral1, then NotebookDocumentFilterLiteral2, then NotebookDocumentFilterLiteral3.
+// Whether a value selects an arm of `NotebookDocumentFilter`: the JSON kind of one, or every required member of a structure arm.
+fn NotebookDocumentFilter.selects(value: Json) -> Bool = has_members(value, ["notebookType"]) || has_members(value, ["scheme"]) || has_members(value, ["pattern"])
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: NotebookDocumentFilterLiteral1, then NotebookDocumentFilterLiteral2, then NotebookDocumentFilterLiteral3.
 fn NotebookDocumentFilter.from_json(value: Json) -> Result<NotebookDocumentFilter, Text> {
-  match NotebookDocumentFilterLiteral1.from_json(value).map_err(|e| "NotebookDocumentFilter" + ": " + e) {
-    Ok(arm) => return Ok(NotebookDocumentFilter.NotebookDocumentFilterLiteral1(arm))
-    Err(_) => {}
+  if has_members(value, ["notebookType"]) {
+    return match NotebookDocumentFilterLiteral1.from_json(value).map_err(|e| "NotebookDocumentFilter" + ": " + e) {
+      Ok(arm) => Ok(NotebookDocumentFilter.NotebookDocumentFilterLiteral1(arm))
+      Err(e) => Err(e)
+    }
   }
-  match NotebookDocumentFilterLiteral2.from_json(value).map_err(|e| "NotebookDocumentFilter" + ": " + e) {
-    Ok(arm) => return Ok(NotebookDocumentFilter.NotebookDocumentFilterLiteral2(arm))
-    Err(_) => {}
+  if has_members(value, ["scheme"]) {
+    return match NotebookDocumentFilterLiteral2.from_json(value).map_err(|e| "NotebookDocumentFilter" + ": " + e) {
+      Ok(arm) => Ok(NotebookDocumentFilter.NotebookDocumentFilterLiteral2(arm))
+      Err(e) => Err(e)
+    }
   }
-  match NotebookDocumentFilterLiteral3.from_json(value).map_err(|e| "NotebookDocumentFilter" + ": " + e) {
-    Ok(arm) => return Ok(NotebookDocumentFilter.NotebookDocumentFilterLiteral3(arm))
-    Err(_) => {}
+  if has_members(value, ["pattern"]) {
+    return match NotebookDocumentFilterLiteral3.from_json(value).map_err(|e| "NotebookDocumentFilter" + ": " + e) {
+      Ok(arm) => Ok(NotebookDocumentFilter.NotebookDocumentFilterLiteral3(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("NotebookDocumentFilter: matches none of NotebookDocumentFilterLiteral1, NotebookDocumentFilterLiteral2, NotebookDocumentFilterLiteral3")
 }
@@ -7909,15 +7953,22 @@ fn NotebookDocumentSyncOptionsNotebookSelectorItem.to_json(value: NotebookDocume
   NotebookDocumentSyncOptionsNotebookSelectorItem.NotebookDocumentSyncOptionsNotebookSelectorItemLiteral2(arm) => NotebookDocumentSyncOptionsNotebookSelectorItemLiteral2.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: NotebookDocumentSyncOptionsNotebookSelectorItemLiteral1, then NotebookDocumentSyncOptionsNotebookSelectorItemLiteral2.
+// Whether a value selects an arm of `NotebookDocumentSyncOptionsNotebookSelectorItem`: the JSON kind of one, or every required member of a structure arm.
+fn NotebookDocumentSyncOptionsNotebookSelectorItem.selects(value: Json) -> Bool = has_members(value, ["notebook"]) || has_members(value, ["cells"])
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: NotebookDocumentSyncOptionsNotebookSelectorItemLiteral1, then NotebookDocumentSyncOptionsNotebookSelectorItemLiteral2.
 fn NotebookDocumentSyncOptionsNotebookSelectorItem.from_json(value: Json) -> Result<NotebookDocumentSyncOptionsNotebookSelectorItem, Text> {
-  match NotebookDocumentSyncOptionsNotebookSelectorItemLiteral1.from_json(value).map_err(|e| "NotebookDocumentSyncOptionsNotebookSelectorItem" + ": " + e) {
-    Ok(arm) => return Ok(NotebookDocumentSyncOptionsNotebookSelectorItem.NotebookDocumentSyncOptionsNotebookSelectorItemLiteral1(arm))
-    Err(_) => {}
+  if has_members(value, ["notebook"]) {
+    return match NotebookDocumentSyncOptionsNotebookSelectorItemLiteral1.from_json(value).map_err(|e| "NotebookDocumentSyncOptionsNotebookSelectorItem" + ": " + e) {
+      Ok(arm) => Ok(NotebookDocumentSyncOptionsNotebookSelectorItem.NotebookDocumentSyncOptionsNotebookSelectorItemLiteral1(arm))
+      Err(e) => Err(e)
+    }
   }
-  match NotebookDocumentSyncOptionsNotebookSelectorItemLiteral2.from_json(value).map_err(|e| "NotebookDocumentSyncOptionsNotebookSelectorItem" + ": " + e) {
-    Ok(arm) => return Ok(NotebookDocumentSyncOptionsNotebookSelectorItem.NotebookDocumentSyncOptionsNotebookSelectorItemLiteral2(arm))
-    Err(_) => {}
+  if has_members(value, ["cells"]) {
+    return match NotebookDocumentSyncOptionsNotebookSelectorItemLiteral2.from_json(value).map_err(|e| "NotebookDocumentSyncOptionsNotebookSelectorItem" + ": " + e) {
+      Ok(arm) => Ok(NotebookDocumentSyncOptionsNotebookSelectorItem.NotebookDocumentSyncOptionsNotebookSelectorItemLiteral2(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("NotebookDocumentSyncOptionsNotebookSelectorItem: matches none of NotebookDocumentSyncOptionsNotebookSelectorItemLiteral1, NotebookDocumentSyncOptionsNotebookSelectorItemLiteral2")
 }
@@ -7934,15 +7985,22 @@ fn NotebookDocumentSyncOptionsNotebookSelectorItemLiteral1Notebook.to_json(value
   NotebookDocumentSyncOptionsNotebookSelectorItemLiteral1Notebook.NotebookDocumentFilter(arm) => NotebookDocumentFilter.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: String, then NotebookDocumentFilter.
+// Whether a value selects an arm of `NotebookDocumentSyncOptionsNotebookSelectorItemLiteral1Notebook`: the JSON kind of one, or every required member of a structure arm.
+fn NotebookDocumentSyncOptionsNotebookSelectorItemLiteral1Notebook.selects(value: Json) -> Bool = is_string(value) || NotebookDocumentFilter.selects(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: String, then NotebookDocumentFilter.
 fn NotebookDocumentSyncOptionsNotebookSelectorItemLiteral1Notebook.from_json(value: Json) -> Result<NotebookDocumentSyncOptionsNotebookSelectorItemLiteral1Notebook, Text> {
-  match decode_text(value, "NotebookDocumentSyncOptionsNotebookSelectorItemLiteral1Notebook") {
-    Ok(arm) => return Ok(NotebookDocumentSyncOptionsNotebookSelectorItemLiteral1Notebook.String(arm))
-    Err(_) => {}
+  if is_string(value) {
+    return match decode_text(value, "NotebookDocumentSyncOptionsNotebookSelectorItemLiteral1Notebook") {
+      Ok(arm) => Ok(NotebookDocumentSyncOptionsNotebookSelectorItemLiteral1Notebook.String(arm))
+      Err(e) => Err(e)
+    }
   }
-  match NotebookDocumentFilter.from_json(value).map_err(|e| "NotebookDocumentSyncOptionsNotebookSelectorItemLiteral1Notebook" + ": " + e) {
-    Ok(arm) => return Ok(NotebookDocumentSyncOptionsNotebookSelectorItemLiteral1Notebook.NotebookDocumentFilter(arm))
-    Err(_) => {}
+  if NotebookDocumentFilter.selects(value) {
+    return match NotebookDocumentFilter.from_json(value).map_err(|e| "NotebookDocumentSyncOptionsNotebookSelectorItemLiteral1Notebook" + ": " + e) {
+      Ok(arm) => Ok(NotebookDocumentSyncOptionsNotebookSelectorItemLiteral1Notebook.NotebookDocumentFilter(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("NotebookDocumentSyncOptionsNotebookSelectorItemLiteral1Notebook: matches none of String, NotebookDocumentFilter")
 }
@@ -7959,15 +8017,22 @@ fn NotebookDocumentSyncOptionsNotebookSelectorItemLiteral2Notebook.to_json(value
   NotebookDocumentSyncOptionsNotebookSelectorItemLiteral2Notebook.NotebookDocumentFilter(arm) => NotebookDocumentFilter.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: String, then NotebookDocumentFilter.
+// Whether a value selects an arm of `NotebookDocumentSyncOptionsNotebookSelectorItemLiteral2Notebook`: the JSON kind of one, or every required member of a structure arm.
+fn NotebookDocumentSyncOptionsNotebookSelectorItemLiteral2Notebook.selects(value: Json) -> Bool = is_string(value) || NotebookDocumentFilter.selects(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: String, then NotebookDocumentFilter.
 fn NotebookDocumentSyncOptionsNotebookSelectorItemLiteral2Notebook.from_json(value: Json) -> Result<NotebookDocumentSyncOptionsNotebookSelectorItemLiteral2Notebook, Text> {
-  match decode_text(value, "NotebookDocumentSyncOptionsNotebookSelectorItemLiteral2Notebook") {
-    Ok(arm) => return Ok(NotebookDocumentSyncOptionsNotebookSelectorItemLiteral2Notebook.String(arm))
-    Err(_) => {}
+  if is_string(value) {
+    return match decode_text(value, "NotebookDocumentSyncOptionsNotebookSelectorItemLiteral2Notebook") {
+      Ok(arm) => Ok(NotebookDocumentSyncOptionsNotebookSelectorItemLiteral2Notebook.String(arm))
+      Err(e) => Err(e)
+    }
   }
-  match NotebookDocumentFilter.from_json(value).map_err(|e| "NotebookDocumentSyncOptionsNotebookSelectorItemLiteral2Notebook" + ": " + e) {
-    Ok(arm) => return Ok(NotebookDocumentSyncOptionsNotebookSelectorItemLiteral2Notebook.NotebookDocumentFilter(arm))
-    Err(_) => {}
+  if NotebookDocumentFilter.selects(value) {
+    return match NotebookDocumentFilter.from_json(value).map_err(|e| "NotebookDocumentSyncOptionsNotebookSelectorItemLiteral2Notebook" + ": " + e) {
+      Ok(arm) => Ok(NotebookDocumentSyncOptionsNotebookSelectorItemLiteral2Notebook.NotebookDocumentFilter(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("NotebookDocumentSyncOptionsNotebookSelectorItemLiteral2Notebook: matches none of String, NotebookDocumentFilter")
 }
@@ -7984,15 +8049,22 @@ fn ProgressToken.to_json(value: ProgressToken) -> Json = match value {
   ProgressToken.String(arm) => Json.Str(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Integer, then String.
+// Whether a value selects an arm of `ProgressToken`: the JSON kind of one, or every required member of a structure arm.
+fn ProgressToken.selects(value: Json) -> Bool = is_number(value) || is_string(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Integer, then String.
 fn ProgressToken.from_json(value: Json) -> Result<ProgressToken, Text> {
-  match decode_int(value, "ProgressToken") {
-    Ok(arm) => return Ok(ProgressToken.Integer(arm))
-    Err(_) => {}
+  if is_number(value) {
+    return match decode_int(value, "ProgressToken") {
+      Ok(arm) => Ok(ProgressToken.Integer(arm))
+      Err(e) => Err(e)
+    }
   }
-  match decode_text(value, "ProgressToken") {
-    Ok(arm) => return Ok(ProgressToken.String(arm))
-    Err(_) => {}
+  if is_string(value) {
+    return match decode_text(value, "ProgressToken") {
+      Ok(arm) => Ok(ProgressToken.String(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("ProgressToken: matches none of Integer, String")
 }
@@ -8009,15 +8081,22 @@ fn SemanticTokensClientCapabilitiesRequestsFull.to_json(value: SemanticTokensCli
   SemanticTokensClientCapabilitiesRequestsFull.SemanticTokensClientCapabilitiesRequestsFullLiteral2(arm) => SemanticTokensClientCapabilitiesRequestsFullLiteral2.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Boolean, then SemanticTokensClientCapabilitiesRequestsFullLiteral2.
+// Whether a value selects an arm of `SemanticTokensClientCapabilitiesRequestsFull`: the JSON kind of one, or every required member of a structure arm.
+fn SemanticTokensClientCapabilitiesRequestsFull.selects(value: Json) -> Bool = is_bool(value) || is_object(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Boolean, then SemanticTokensClientCapabilitiesRequestsFullLiteral2.
 fn SemanticTokensClientCapabilitiesRequestsFull.from_json(value: Json) -> Result<SemanticTokensClientCapabilitiesRequestsFull, Text> {
-  match decode_bool(value, "SemanticTokensClientCapabilitiesRequestsFull") {
-    Ok(arm) => return Ok(SemanticTokensClientCapabilitiesRequestsFull.Boolean(arm))
-    Err(_) => {}
+  if is_bool(value) {
+    return match decode_bool(value, "SemanticTokensClientCapabilitiesRequestsFull") {
+      Ok(arm) => Ok(SemanticTokensClientCapabilitiesRequestsFull.Boolean(arm))
+      Err(e) => Err(e)
+    }
   }
-  match SemanticTokensClientCapabilitiesRequestsFullLiteral2.from_json(value).map_err(|e| "SemanticTokensClientCapabilitiesRequestsFull" + ": " + e) {
-    Ok(arm) => return Ok(SemanticTokensClientCapabilitiesRequestsFull.SemanticTokensClientCapabilitiesRequestsFullLiteral2(arm))
-    Err(_) => {}
+  if is_object(value) {
+    return match SemanticTokensClientCapabilitiesRequestsFullLiteral2.from_json(value).map_err(|e| "SemanticTokensClientCapabilitiesRequestsFull" + ": " + e) {
+      Ok(arm) => Ok(SemanticTokensClientCapabilitiesRequestsFull.SemanticTokensClientCapabilitiesRequestsFullLiteral2(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("SemanticTokensClientCapabilitiesRequestsFull: matches none of Boolean, SemanticTokensClientCapabilitiesRequestsFullLiteral2")
 }
@@ -8034,15 +8113,22 @@ fn SemanticTokensClientCapabilitiesRequestsRange.to_json(value: SemanticTokensCl
   SemanticTokensClientCapabilitiesRequestsRange.SemanticTokensClientCapabilitiesRequestsRangeLiteral2(arm) => SemanticTokensClientCapabilitiesRequestsRangeLiteral2.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Boolean, then SemanticTokensClientCapabilitiesRequestsRangeLiteral2.
+// Whether a value selects an arm of `SemanticTokensClientCapabilitiesRequestsRange`: the JSON kind of one, or every required member of a structure arm.
+fn SemanticTokensClientCapabilitiesRequestsRange.selects(value: Json) -> Bool = is_bool(value) || is_object(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Boolean, then SemanticTokensClientCapabilitiesRequestsRangeLiteral2.
 fn SemanticTokensClientCapabilitiesRequestsRange.from_json(value: Json) -> Result<SemanticTokensClientCapabilitiesRequestsRange, Text> {
-  match decode_bool(value, "SemanticTokensClientCapabilitiesRequestsRange") {
-    Ok(arm) => return Ok(SemanticTokensClientCapabilitiesRequestsRange.Boolean(arm))
-    Err(_) => {}
+  if is_bool(value) {
+    return match decode_bool(value, "SemanticTokensClientCapabilitiesRequestsRange") {
+      Ok(arm) => Ok(SemanticTokensClientCapabilitiesRequestsRange.Boolean(arm))
+      Err(e) => Err(e)
+    }
   }
-  match SemanticTokensClientCapabilitiesRequestsRangeLiteral2.from_json(value).map_err(|e| "SemanticTokensClientCapabilitiesRequestsRange" + ": " + e) {
-    Ok(arm) => return Ok(SemanticTokensClientCapabilitiesRequestsRange.SemanticTokensClientCapabilitiesRequestsRangeLiteral2(arm))
-    Err(_) => {}
+  if is_object(value) {
+    return match SemanticTokensClientCapabilitiesRequestsRangeLiteral2.from_json(value).map_err(|e| "SemanticTokensClientCapabilitiesRequestsRange" + ": " + e) {
+      Ok(arm) => Ok(SemanticTokensClientCapabilitiesRequestsRange.SemanticTokensClientCapabilitiesRequestsRangeLiteral2(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("SemanticTokensClientCapabilitiesRequestsRange: matches none of Boolean, SemanticTokensClientCapabilitiesRequestsRangeLiteral2")
 }
@@ -8059,15 +8145,22 @@ fn SemanticTokensOptionsFull.to_json(value: SemanticTokensOptionsFull) -> Json =
   SemanticTokensOptionsFull.SemanticTokensOptionsFullLiteral2(arm) => SemanticTokensOptionsFullLiteral2.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Boolean, then SemanticTokensOptionsFullLiteral2.
+// Whether a value selects an arm of `SemanticTokensOptionsFull`: the JSON kind of one, or every required member of a structure arm.
+fn SemanticTokensOptionsFull.selects(value: Json) -> Bool = is_bool(value) || is_object(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Boolean, then SemanticTokensOptionsFullLiteral2.
 fn SemanticTokensOptionsFull.from_json(value: Json) -> Result<SemanticTokensOptionsFull, Text> {
-  match decode_bool(value, "SemanticTokensOptionsFull") {
-    Ok(arm) => return Ok(SemanticTokensOptionsFull.Boolean(arm))
-    Err(_) => {}
+  if is_bool(value) {
+    return match decode_bool(value, "SemanticTokensOptionsFull") {
+      Ok(arm) => Ok(SemanticTokensOptionsFull.Boolean(arm))
+      Err(e) => Err(e)
+    }
   }
-  match SemanticTokensOptionsFullLiteral2.from_json(value).map_err(|e| "SemanticTokensOptionsFull" + ": " + e) {
-    Ok(arm) => return Ok(SemanticTokensOptionsFull.SemanticTokensOptionsFullLiteral2(arm))
-    Err(_) => {}
+  if is_object(value) {
+    return match SemanticTokensOptionsFullLiteral2.from_json(value).map_err(|e| "SemanticTokensOptionsFull" + ": " + e) {
+      Ok(arm) => Ok(SemanticTokensOptionsFull.SemanticTokensOptionsFullLiteral2(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("SemanticTokensOptionsFull: matches none of Boolean, SemanticTokensOptionsFullLiteral2")
 }
@@ -8084,15 +8177,22 @@ fn SemanticTokensOptionsRange.to_json(value: SemanticTokensOptionsRange) -> Json
   SemanticTokensOptionsRange.SemanticTokensOptionsRangeLiteral2(arm) => SemanticTokensOptionsRangeLiteral2.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Boolean, then SemanticTokensOptionsRangeLiteral2.
+// Whether a value selects an arm of `SemanticTokensOptionsRange`: the JSON kind of one, or every required member of a structure arm.
+fn SemanticTokensOptionsRange.selects(value: Json) -> Bool = is_bool(value) || is_object(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Boolean, then SemanticTokensOptionsRangeLiteral2.
 fn SemanticTokensOptionsRange.from_json(value: Json) -> Result<SemanticTokensOptionsRange, Text> {
-  match decode_bool(value, "SemanticTokensOptionsRange") {
-    Ok(arm) => return Ok(SemanticTokensOptionsRange.Boolean(arm))
-    Err(_) => {}
+  if is_bool(value) {
+    return match decode_bool(value, "SemanticTokensOptionsRange") {
+      Ok(arm) => Ok(SemanticTokensOptionsRange.Boolean(arm))
+      Err(e) => Err(e)
+    }
   }
-  match SemanticTokensOptionsRangeLiteral2.from_json(value).map_err(|e| "SemanticTokensOptionsRange" + ": " + e) {
-    Ok(arm) => return Ok(SemanticTokensOptionsRange.SemanticTokensOptionsRangeLiteral2(arm))
-    Err(_) => {}
+  if is_object(value) {
+    return match SemanticTokensOptionsRangeLiteral2.from_json(value).map_err(|e| "SemanticTokensOptionsRange" + ": " + e) {
+      Ok(arm) => Ok(SemanticTokensOptionsRange.SemanticTokensOptionsRangeLiteral2(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("SemanticTokensOptionsRange: matches none of Boolean, SemanticTokensOptionsRangeLiteral2")
 }
@@ -8111,19 +8211,28 @@ fn ServerCapabilitiesCallHierarchyProvider.to_json(value: ServerCapabilitiesCall
   ServerCapabilitiesCallHierarchyProvider.CallHierarchyRegistrationOptions(arm) => CallHierarchyRegistrationOptions.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Boolean, then CallHierarchyRegistrationOptions, then CallHierarchyOptions.
+// Whether a value selects an arm of `ServerCapabilitiesCallHierarchyProvider`: the JSON kind of one, or every required member of a structure arm.
+fn ServerCapabilitiesCallHierarchyProvider.selects(value: Json) -> Bool = is_bool(value) || has_members(value, ["documentSelector"]) || is_object(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Boolean, then CallHierarchyRegistrationOptions, then CallHierarchyOptions.
 fn ServerCapabilitiesCallHierarchyProvider.from_json(value: Json) -> Result<ServerCapabilitiesCallHierarchyProvider, Text> {
-  match decode_bool(value, "ServerCapabilitiesCallHierarchyProvider") {
-    Ok(arm) => return Ok(ServerCapabilitiesCallHierarchyProvider.Boolean(arm))
-    Err(_) => {}
+  if is_bool(value) {
+    return match decode_bool(value, "ServerCapabilitiesCallHierarchyProvider") {
+      Ok(arm) => Ok(ServerCapabilitiesCallHierarchyProvider.Boolean(arm))
+      Err(e) => Err(e)
+    }
   }
-  match CallHierarchyRegistrationOptions.from_json(value).map_err(|e| "ServerCapabilitiesCallHierarchyProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesCallHierarchyProvider.CallHierarchyRegistrationOptions(arm))
-    Err(_) => {}
+  if has_members(value, ["documentSelector"]) {
+    return match CallHierarchyRegistrationOptions.from_json(value).map_err(|e| "ServerCapabilitiesCallHierarchyProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesCallHierarchyProvider.CallHierarchyRegistrationOptions(arm))
+      Err(e) => Err(e)
+    }
   }
-  match CallHierarchyOptions.from_json(value).map_err(|e| "ServerCapabilitiesCallHierarchyProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesCallHierarchyProvider.CallHierarchyOptions(arm))
-    Err(_) => {}
+  if is_object(value) {
+    return match CallHierarchyOptions.from_json(value).map_err(|e| "ServerCapabilitiesCallHierarchyProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesCallHierarchyProvider.CallHierarchyOptions(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("ServerCapabilitiesCallHierarchyProvider: matches none of Boolean, CallHierarchyRegistrationOptions, CallHierarchyOptions")
 }
@@ -8140,15 +8249,22 @@ fn ServerCapabilitiesCodeActionProvider.to_json(value: ServerCapabilitiesCodeAct
   ServerCapabilitiesCodeActionProvider.CodeActionOptions(arm) => CodeActionOptions.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Boolean, then CodeActionOptions.
+// Whether a value selects an arm of `ServerCapabilitiesCodeActionProvider`: the JSON kind of one, or every required member of a structure arm.
+fn ServerCapabilitiesCodeActionProvider.selects(value: Json) -> Bool = is_bool(value) || is_object(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Boolean, then CodeActionOptions.
 fn ServerCapabilitiesCodeActionProvider.from_json(value: Json) -> Result<ServerCapabilitiesCodeActionProvider, Text> {
-  match decode_bool(value, "ServerCapabilitiesCodeActionProvider") {
-    Ok(arm) => return Ok(ServerCapabilitiesCodeActionProvider.Boolean(arm))
-    Err(_) => {}
+  if is_bool(value) {
+    return match decode_bool(value, "ServerCapabilitiesCodeActionProvider") {
+      Ok(arm) => Ok(ServerCapabilitiesCodeActionProvider.Boolean(arm))
+      Err(e) => Err(e)
+    }
   }
-  match CodeActionOptions.from_json(value).map_err(|e| "ServerCapabilitiesCodeActionProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesCodeActionProvider.CodeActionOptions(arm))
-    Err(_) => {}
+  if is_object(value) {
+    return match CodeActionOptions.from_json(value).map_err(|e| "ServerCapabilitiesCodeActionProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesCodeActionProvider.CodeActionOptions(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("ServerCapabilitiesCodeActionProvider: matches none of Boolean, CodeActionOptions")
 }
@@ -8167,19 +8283,28 @@ fn ServerCapabilitiesColorProvider.to_json(value: ServerCapabilitiesColorProvide
   ServerCapabilitiesColorProvider.DocumentColorRegistrationOptions(arm) => DocumentColorRegistrationOptions.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Boolean, then DocumentColorRegistrationOptions, then DocumentColorOptions.
+// Whether a value selects an arm of `ServerCapabilitiesColorProvider`: the JSON kind of one, or every required member of a structure arm.
+fn ServerCapabilitiesColorProvider.selects(value: Json) -> Bool = is_bool(value) || has_members(value, ["documentSelector"]) || is_object(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Boolean, then DocumentColorRegistrationOptions, then DocumentColorOptions.
 fn ServerCapabilitiesColorProvider.from_json(value: Json) -> Result<ServerCapabilitiesColorProvider, Text> {
-  match decode_bool(value, "ServerCapabilitiesColorProvider") {
-    Ok(arm) => return Ok(ServerCapabilitiesColorProvider.Boolean(arm))
-    Err(_) => {}
+  if is_bool(value) {
+    return match decode_bool(value, "ServerCapabilitiesColorProvider") {
+      Ok(arm) => Ok(ServerCapabilitiesColorProvider.Boolean(arm))
+      Err(e) => Err(e)
+    }
   }
-  match DocumentColorRegistrationOptions.from_json(value).map_err(|e| "ServerCapabilitiesColorProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesColorProvider.DocumentColorRegistrationOptions(arm))
-    Err(_) => {}
+  if has_members(value, ["documentSelector"]) {
+    return match DocumentColorRegistrationOptions.from_json(value).map_err(|e| "ServerCapabilitiesColorProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesColorProvider.DocumentColorRegistrationOptions(arm))
+      Err(e) => Err(e)
+    }
   }
-  match DocumentColorOptions.from_json(value).map_err(|e| "ServerCapabilitiesColorProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesColorProvider.DocumentColorOptions(arm))
-    Err(_) => {}
+  if is_object(value) {
+    return match DocumentColorOptions.from_json(value).map_err(|e| "ServerCapabilitiesColorProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesColorProvider.DocumentColorOptions(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("ServerCapabilitiesColorProvider: matches none of Boolean, DocumentColorRegistrationOptions, DocumentColorOptions")
 }
@@ -8198,19 +8323,28 @@ fn ServerCapabilitiesDeclarationProvider.to_json(value: ServerCapabilitiesDeclar
   ServerCapabilitiesDeclarationProvider.DeclarationRegistrationOptions(arm) => DeclarationRegistrationOptions.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Boolean, then DeclarationRegistrationOptions, then DeclarationOptions.
+// Whether a value selects an arm of `ServerCapabilitiesDeclarationProvider`: the JSON kind of one, or every required member of a structure arm.
+fn ServerCapabilitiesDeclarationProvider.selects(value: Json) -> Bool = is_bool(value) || has_members(value, ["documentSelector"]) || is_object(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Boolean, then DeclarationRegistrationOptions, then DeclarationOptions.
 fn ServerCapabilitiesDeclarationProvider.from_json(value: Json) -> Result<ServerCapabilitiesDeclarationProvider, Text> {
-  match decode_bool(value, "ServerCapabilitiesDeclarationProvider") {
-    Ok(arm) => return Ok(ServerCapabilitiesDeclarationProvider.Boolean(arm))
-    Err(_) => {}
+  if is_bool(value) {
+    return match decode_bool(value, "ServerCapabilitiesDeclarationProvider") {
+      Ok(arm) => Ok(ServerCapabilitiesDeclarationProvider.Boolean(arm))
+      Err(e) => Err(e)
+    }
   }
-  match DeclarationRegistrationOptions.from_json(value).map_err(|e| "ServerCapabilitiesDeclarationProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesDeclarationProvider.DeclarationRegistrationOptions(arm))
-    Err(_) => {}
+  if has_members(value, ["documentSelector"]) {
+    return match DeclarationRegistrationOptions.from_json(value).map_err(|e| "ServerCapabilitiesDeclarationProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesDeclarationProvider.DeclarationRegistrationOptions(arm))
+      Err(e) => Err(e)
+    }
   }
-  match DeclarationOptions.from_json(value).map_err(|e| "ServerCapabilitiesDeclarationProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesDeclarationProvider.DeclarationOptions(arm))
-    Err(_) => {}
+  if is_object(value) {
+    return match DeclarationOptions.from_json(value).map_err(|e| "ServerCapabilitiesDeclarationProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesDeclarationProvider.DeclarationOptions(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("ServerCapabilitiesDeclarationProvider: matches none of Boolean, DeclarationRegistrationOptions, DeclarationOptions")
 }
@@ -8227,15 +8361,22 @@ fn ServerCapabilitiesDefinitionProvider.to_json(value: ServerCapabilitiesDefinit
   ServerCapabilitiesDefinitionProvider.DefinitionOptions(arm) => DefinitionOptions.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Boolean, then DefinitionOptions.
+// Whether a value selects an arm of `ServerCapabilitiesDefinitionProvider`: the JSON kind of one, or every required member of a structure arm.
+fn ServerCapabilitiesDefinitionProvider.selects(value: Json) -> Bool = is_bool(value) || is_object(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Boolean, then DefinitionOptions.
 fn ServerCapabilitiesDefinitionProvider.from_json(value: Json) -> Result<ServerCapabilitiesDefinitionProvider, Text> {
-  match decode_bool(value, "ServerCapabilitiesDefinitionProvider") {
-    Ok(arm) => return Ok(ServerCapabilitiesDefinitionProvider.Boolean(arm))
-    Err(_) => {}
+  if is_bool(value) {
+    return match decode_bool(value, "ServerCapabilitiesDefinitionProvider") {
+      Ok(arm) => Ok(ServerCapabilitiesDefinitionProvider.Boolean(arm))
+      Err(e) => Err(e)
+    }
   }
-  match DefinitionOptions.from_json(value).map_err(|e| "ServerCapabilitiesDefinitionProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesDefinitionProvider.DefinitionOptions(arm))
-    Err(_) => {}
+  if is_object(value) {
+    return match DefinitionOptions.from_json(value).map_err(|e| "ServerCapabilitiesDefinitionProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesDefinitionProvider.DefinitionOptions(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("ServerCapabilitiesDefinitionProvider: matches none of Boolean, DefinitionOptions")
 }
@@ -8252,15 +8393,22 @@ fn ServerCapabilitiesDiagnosticProvider.to_json(value: ServerCapabilitiesDiagnos
   ServerCapabilitiesDiagnosticProvider.DiagnosticRegistrationOptions(arm) => DiagnosticRegistrationOptions.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: DiagnosticRegistrationOptions, then DiagnosticOptions.
+// Whether a value selects an arm of `ServerCapabilitiesDiagnosticProvider`: the JSON kind of one, or every required member of a structure arm.
+fn ServerCapabilitiesDiagnosticProvider.selects(value: Json) -> Bool = has_members(value, ["documentSelector", "interFileDependencies", "workspaceDiagnostics"]) || has_members(value, ["interFileDependencies", "workspaceDiagnostics"])
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: DiagnosticRegistrationOptions, then DiagnosticOptions.
 fn ServerCapabilitiesDiagnosticProvider.from_json(value: Json) -> Result<ServerCapabilitiesDiagnosticProvider, Text> {
-  match DiagnosticRegistrationOptions.from_json(value).map_err(|e| "ServerCapabilitiesDiagnosticProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesDiagnosticProvider.DiagnosticRegistrationOptions(arm))
-    Err(_) => {}
+  if has_members(value, ["documentSelector", "interFileDependencies", "workspaceDiagnostics"]) {
+    return match DiagnosticRegistrationOptions.from_json(value).map_err(|e| "ServerCapabilitiesDiagnosticProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesDiagnosticProvider.DiagnosticRegistrationOptions(arm))
+      Err(e) => Err(e)
+    }
   }
-  match DiagnosticOptions.from_json(value).map_err(|e| "ServerCapabilitiesDiagnosticProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesDiagnosticProvider.DiagnosticOptions(arm))
-    Err(_) => {}
+  if has_members(value, ["interFileDependencies", "workspaceDiagnostics"]) {
+    return match DiagnosticOptions.from_json(value).map_err(|e| "ServerCapabilitiesDiagnosticProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesDiagnosticProvider.DiagnosticOptions(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("ServerCapabilitiesDiagnosticProvider: matches none of DiagnosticRegistrationOptions, DiagnosticOptions")
 }
@@ -8277,15 +8425,22 @@ fn ServerCapabilitiesDocumentFormattingProvider.to_json(value: ServerCapabilitie
   ServerCapabilitiesDocumentFormattingProvider.DocumentFormattingOptions(arm) => DocumentFormattingOptions.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Boolean, then DocumentFormattingOptions.
+// Whether a value selects an arm of `ServerCapabilitiesDocumentFormattingProvider`: the JSON kind of one, or every required member of a structure arm.
+fn ServerCapabilitiesDocumentFormattingProvider.selects(value: Json) -> Bool = is_bool(value) || is_object(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Boolean, then DocumentFormattingOptions.
 fn ServerCapabilitiesDocumentFormattingProvider.from_json(value: Json) -> Result<ServerCapabilitiesDocumentFormattingProvider, Text> {
-  match decode_bool(value, "ServerCapabilitiesDocumentFormattingProvider") {
-    Ok(arm) => return Ok(ServerCapabilitiesDocumentFormattingProvider.Boolean(arm))
-    Err(_) => {}
+  if is_bool(value) {
+    return match decode_bool(value, "ServerCapabilitiesDocumentFormattingProvider") {
+      Ok(arm) => Ok(ServerCapabilitiesDocumentFormattingProvider.Boolean(arm))
+      Err(e) => Err(e)
+    }
   }
-  match DocumentFormattingOptions.from_json(value).map_err(|e| "ServerCapabilitiesDocumentFormattingProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesDocumentFormattingProvider.DocumentFormattingOptions(arm))
-    Err(_) => {}
+  if is_object(value) {
+    return match DocumentFormattingOptions.from_json(value).map_err(|e| "ServerCapabilitiesDocumentFormattingProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesDocumentFormattingProvider.DocumentFormattingOptions(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("ServerCapabilitiesDocumentFormattingProvider: matches none of Boolean, DocumentFormattingOptions")
 }
@@ -8302,15 +8457,22 @@ fn ServerCapabilitiesDocumentHighlightProvider.to_json(value: ServerCapabilities
   ServerCapabilitiesDocumentHighlightProvider.DocumentHighlightOptions(arm) => DocumentHighlightOptions.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Boolean, then DocumentHighlightOptions.
+// Whether a value selects an arm of `ServerCapabilitiesDocumentHighlightProvider`: the JSON kind of one, or every required member of a structure arm.
+fn ServerCapabilitiesDocumentHighlightProvider.selects(value: Json) -> Bool = is_bool(value) || is_object(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Boolean, then DocumentHighlightOptions.
 fn ServerCapabilitiesDocumentHighlightProvider.from_json(value: Json) -> Result<ServerCapabilitiesDocumentHighlightProvider, Text> {
-  match decode_bool(value, "ServerCapabilitiesDocumentHighlightProvider") {
-    Ok(arm) => return Ok(ServerCapabilitiesDocumentHighlightProvider.Boolean(arm))
-    Err(_) => {}
+  if is_bool(value) {
+    return match decode_bool(value, "ServerCapabilitiesDocumentHighlightProvider") {
+      Ok(arm) => Ok(ServerCapabilitiesDocumentHighlightProvider.Boolean(arm))
+      Err(e) => Err(e)
+    }
   }
-  match DocumentHighlightOptions.from_json(value).map_err(|e| "ServerCapabilitiesDocumentHighlightProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesDocumentHighlightProvider.DocumentHighlightOptions(arm))
-    Err(_) => {}
+  if is_object(value) {
+    return match DocumentHighlightOptions.from_json(value).map_err(|e| "ServerCapabilitiesDocumentHighlightProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesDocumentHighlightProvider.DocumentHighlightOptions(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("ServerCapabilitiesDocumentHighlightProvider: matches none of Boolean, DocumentHighlightOptions")
 }
@@ -8327,15 +8489,22 @@ fn ServerCapabilitiesDocumentRangeFormattingProvider.to_json(value: ServerCapabi
   ServerCapabilitiesDocumentRangeFormattingProvider.DocumentRangeFormattingOptions(arm) => DocumentRangeFormattingOptions.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Boolean, then DocumentRangeFormattingOptions.
+// Whether a value selects an arm of `ServerCapabilitiesDocumentRangeFormattingProvider`: the JSON kind of one, or every required member of a structure arm.
+fn ServerCapabilitiesDocumentRangeFormattingProvider.selects(value: Json) -> Bool = is_bool(value) || is_object(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Boolean, then DocumentRangeFormattingOptions.
 fn ServerCapabilitiesDocumentRangeFormattingProvider.from_json(value: Json) -> Result<ServerCapabilitiesDocumentRangeFormattingProvider, Text> {
-  match decode_bool(value, "ServerCapabilitiesDocumentRangeFormattingProvider") {
-    Ok(arm) => return Ok(ServerCapabilitiesDocumentRangeFormattingProvider.Boolean(arm))
-    Err(_) => {}
+  if is_bool(value) {
+    return match decode_bool(value, "ServerCapabilitiesDocumentRangeFormattingProvider") {
+      Ok(arm) => Ok(ServerCapabilitiesDocumentRangeFormattingProvider.Boolean(arm))
+      Err(e) => Err(e)
+    }
   }
-  match DocumentRangeFormattingOptions.from_json(value).map_err(|e| "ServerCapabilitiesDocumentRangeFormattingProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesDocumentRangeFormattingProvider.DocumentRangeFormattingOptions(arm))
-    Err(_) => {}
+  if is_object(value) {
+    return match DocumentRangeFormattingOptions.from_json(value).map_err(|e| "ServerCapabilitiesDocumentRangeFormattingProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesDocumentRangeFormattingProvider.DocumentRangeFormattingOptions(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("ServerCapabilitiesDocumentRangeFormattingProvider: matches none of Boolean, DocumentRangeFormattingOptions")
 }
@@ -8352,15 +8521,22 @@ fn ServerCapabilitiesDocumentSymbolProvider.to_json(value: ServerCapabilitiesDoc
   ServerCapabilitiesDocumentSymbolProvider.DocumentSymbolOptions(arm) => DocumentSymbolOptions.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Boolean, then DocumentSymbolOptions.
+// Whether a value selects an arm of `ServerCapabilitiesDocumentSymbolProvider`: the JSON kind of one, or every required member of a structure arm.
+fn ServerCapabilitiesDocumentSymbolProvider.selects(value: Json) -> Bool = is_bool(value) || is_object(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Boolean, then DocumentSymbolOptions.
 fn ServerCapabilitiesDocumentSymbolProvider.from_json(value: Json) -> Result<ServerCapabilitiesDocumentSymbolProvider, Text> {
-  match decode_bool(value, "ServerCapabilitiesDocumentSymbolProvider") {
-    Ok(arm) => return Ok(ServerCapabilitiesDocumentSymbolProvider.Boolean(arm))
-    Err(_) => {}
+  if is_bool(value) {
+    return match decode_bool(value, "ServerCapabilitiesDocumentSymbolProvider") {
+      Ok(arm) => Ok(ServerCapabilitiesDocumentSymbolProvider.Boolean(arm))
+      Err(e) => Err(e)
+    }
   }
-  match DocumentSymbolOptions.from_json(value).map_err(|e| "ServerCapabilitiesDocumentSymbolProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesDocumentSymbolProvider.DocumentSymbolOptions(arm))
-    Err(_) => {}
+  if is_object(value) {
+    return match DocumentSymbolOptions.from_json(value).map_err(|e| "ServerCapabilitiesDocumentSymbolProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesDocumentSymbolProvider.DocumentSymbolOptions(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("ServerCapabilitiesDocumentSymbolProvider: matches none of Boolean, DocumentSymbolOptions")
 }
@@ -8379,19 +8555,28 @@ fn ServerCapabilitiesFoldingRangeProvider.to_json(value: ServerCapabilitiesFoldi
   ServerCapabilitiesFoldingRangeProvider.FoldingRangeRegistrationOptions(arm) => FoldingRangeRegistrationOptions.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Boolean, then FoldingRangeRegistrationOptions, then FoldingRangeOptions.
+// Whether a value selects an arm of `ServerCapabilitiesFoldingRangeProvider`: the JSON kind of one, or every required member of a structure arm.
+fn ServerCapabilitiesFoldingRangeProvider.selects(value: Json) -> Bool = is_bool(value) || has_members(value, ["documentSelector"]) || is_object(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Boolean, then FoldingRangeRegistrationOptions, then FoldingRangeOptions.
 fn ServerCapabilitiesFoldingRangeProvider.from_json(value: Json) -> Result<ServerCapabilitiesFoldingRangeProvider, Text> {
-  match decode_bool(value, "ServerCapabilitiesFoldingRangeProvider") {
-    Ok(arm) => return Ok(ServerCapabilitiesFoldingRangeProvider.Boolean(arm))
-    Err(_) => {}
+  if is_bool(value) {
+    return match decode_bool(value, "ServerCapabilitiesFoldingRangeProvider") {
+      Ok(arm) => Ok(ServerCapabilitiesFoldingRangeProvider.Boolean(arm))
+      Err(e) => Err(e)
+    }
   }
-  match FoldingRangeRegistrationOptions.from_json(value).map_err(|e| "ServerCapabilitiesFoldingRangeProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesFoldingRangeProvider.FoldingRangeRegistrationOptions(arm))
-    Err(_) => {}
+  if has_members(value, ["documentSelector"]) {
+    return match FoldingRangeRegistrationOptions.from_json(value).map_err(|e| "ServerCapabilitiesFoldingRangeProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesFoldingRangeProvider.FoldingRangeRegistrationOptions(arm))
+      Err(e) => Err(e)
+    }
   }
-  match FoldingRangeOptions.from_json(value).map_err(|e| "ServerCapabilitiesFoldingRangeProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesFoldingRangeProvider.FoldingRangeOptions(arm))
-    Err(_) => {}
+  if is_object(value) {
+    return match FoldingRangeOptions.from_json(value).map_err(|e| "ServerCapabilitiesFoldingRangeProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesFoldingRangeProvider.FoldingRangeOptions(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("ServerCapabilitiesFoldingRangeProvider: matches none of Boolean, FoldingRangeRegistrationOptions, FoldingRangeOptions")
 }
@@ -8408,15 +8593,22 @@ fn ServerCapabilitiesHoverProvider.to_json(value: ServerCapabilitiesHoverProvide
   ServerCapabilitiesHoverProvider.HoverOptions(arm) => HoverOptions.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Boolean, then HoverOptions.
+// Whether a value selects an arm of `ServerCapabilitiesHoverProvider`: the JSON kind of one, or every required member of a structure arm.
+fn ServerCapabilitiesHoverProvider.selects(value: Json) -> Bool = is_bool(value) || is_object(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Boolean, then HoverOptions.
 fn ServerCapabilitiesHoverProvider.from_json(value: Json) -> Result<ServerCapabilitiesHoverProvider, Text> {
-  match decode_bool(value, "ServerCapabilitiesHoverProvider") {
-    Ok(arm) => return Ok(ServerCapabilitiesHoverProvider.Boolean(arm))
-    Err(_) => {}
+  if is_bool(value) {
+    return match decode_bool(value, "ServerCapabilitiesHoverProvider") {
+      Ok(arm) => Ok(ServerCapabilitiesHoverProvider.Boolean(arm))
+      Err(e) => Err(e)
+    }
   }
-  match HoverOptions.from_json(value).map_err(|e| "ServerCapabilitiesHoverProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesHoverProvider.HoverOptions(arm))
-    Err(_) => {}
+  if is_object(value) {
+    return match HoverOptions.from_json(value).map_err(|e| "ServerCapabilitiesHoverProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesHoverProvider.HoverOptions(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("ServerCapabilitiesHoverProvider: matches none of Boolean, HoverOptions")
 }
@@ -8435,19 +8627,28 @@ fn ServerCapabilitiesImplementationProvider.to_json(value: ServerCapabilitiesImp
   ServerCapabilitiesImplementationProvider.ImplementationRegistrationOptions(arm) => ImplementationRegistrationOptions.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Boolean, then ImplementationRegistrationOptions, then ImplementationOptions.
+// Whether a value selects an arm of `ServerCapabilitiesImplementationProvider`: the JSON kind of one, or every required member of a structure arm.
+fn ServerCapabilitiesImplementationProvider.selects(value: Json) -> Bool = is_bool(value) || has_members(value, ["documentSelector"]) || is_object(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Boolean, then ImplementationRegistrationOptions, then ImplementationOptions.
 fn ServerCapabilitiesImplementationProvider.from_json(value: Json) -> Result<ServerCapabilitiesImplementationProvider, Text> {
-  match decode_bool(value, "ServerCapabilitiesImplementationProvider") {
-    Ok(arm) => return Ok(ServerCapabilitiesImplementationProvider.Boolean(arm))
-    Err(_) => {}
+  if is_bool(value) {
+    return match decode_bool(value, "ServerCapabilitiesImplementationProvider") {
+      Ok(arm) => Ok(ServerCapabilitiesImplementationProvider.Boolean(arm))
+      Err(e) => Err(e)
+    }
   }
-  match ImplementationRegistrationOptions.from_json(value).map_err(|e| "ServerCapabilitiesImplementationProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesImplementationProvider.ImplementationRegistrationOptions(arm))
-    Err(_) => {}
+  if has_members(value, ["documentSelector"]) {
+    return match ImplementationRegistrationOptions.from_json(value).map_err(|e| "ServerCapabilitiesImplementationProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesImplementationProvider.ImplementationRegistrationOptions(arm))
+      Err(e) => Err(e)
+    }
   }
-  match ImplementationOptions.from_json(value).map_err(|e| "ServerCapabilitiesImplementationProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesImplementationProvider.ImplementationOptions(arm))
-    Err(_) => {}
+  if is_object(value) {
+    return match ImplementationOptions.from_json(value).map_err(|e| "ServerCapabilitiesImplementationProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesImplementationProvider.ImplementationOptions(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("ServerCapabilitiesImplementationProvider: matches none of Boolean, ImplementationRegistrationOptions, ImplementationOptions")
 }
@@ -8466,19 +8667,28 @@ fn ServerCapabilitiesInlayHintProvider.to_json(value: ServerCapabilitiesInlayHin
   ServerCapabilitiesInlayHintProvider.InlayHintRegistrationOptions(arm) => InlayHintRegistrationOptions.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Boolean, then InlayHintRegistrationOptions, then InlayHintOptions.
+// Whether a value selects an arm of `ServerCapabilitiesInlayHintProvider`: the JSON kind of one, or every required member of a structure arm.
+fn ServerCapabilitiesInlayHintProvider.selects(value: Json) -> Bool = is_bool(value) || has_members(value, ["documentSelector"]) || is_object(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Boolean, then InlayHintRegistrationOptions, then InlayHintOptions.
 fn ServerCapabilitiesInlayHintProvider.from_json(value: Json) -> Result<ServerCapabilitiesInlayHintProvider, Text> {
-  match decode_bool(value, "ServerCapabilitiesInlayHintProvider") {
-    Ok(arm) => return Ok(ServerCapabilitiesInlayHintProvider.Boolean(arm))
-    Err(_) => {}
+  if is_bool(value) {
+    return match decode_bool(value, "ServerCapabilitiesInlayHintProvider") {
+      Ok(arm) => Ok(ServerCapabilitiesInlayHintProvider.Boolean(arm))
+      Err(e) => Err(e)
+    }
   }
-  match InlayHintRegistrationOptions.from_json(value).map_err(|e| "ServerCapabilitiesInlayHintProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesInlayHintProvider.InlayHintRegistrationOptions(arm))
-    Err(_) => {}
+  if has_members(value, ["documentSelector"]) {
+    return match InlayHintRegistrationOptions.from_json(value).map_err(|e| "ServerCapabilitiesInlayHintProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesInlayHintProvider.InlayHintRegistrationOptions(arm))
+      Err(e) => Err(e)
+    }
   }
-  match InlayHintOptions.from_json(value).map_err(|e| "ServerCapabilitiesInlayHintProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesInlayHintProvider.InlayHintOptions(arm))
-    Err(_) => {}
+  if is_object(value) {
+    return match InlayHintOptions.from_json(value).map_err(|e| "ServerCapabilitiesInlayHintProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesInlayHintProvider.InlayHintOptions(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("ServerCapabilitiesInlayHintProvider: matches none of Boolean, InlayHintRegistrationOptions, InlayHintOptions")
 }
@@ -8495,15 +8705,22 @@ fn ServerCapabilitiesInlineCompletionProvider.to_json(value: ServerCapabilitiesI
   ServerCapabilitiesInlineCompletionProvider.InlineCompletionOptions(arm) => InlineCompletionOptions.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Boolean, then InlineCompletionOptions.
+// Whether a value selects an arm of `ServerCapabilitiesInlineCompletionProvider`: the JSON kind of one, or every required member of a structure arm.
+fn ServerCapabilitiesInlineCompletionProvider.selects(value: Json) -> Bool = is_bool(value) || is_object(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Boolean, then InlineCompletionOptions.
 fn ServerCapabilitiesInlineCompletionProvider.from_json(value: Json) -> Result<ServerCapabilitiesInlineCompletionProvider, Text> {
-  match decode_bool(value, "ServerCapabilitiesInlineCompletionProvider") {
-    Ok(arm) => return Ok(ServerCapabilitiesInlineCompletionProvider.Boolean(arm))
-    Err(_) => {}
+  if is_bool(value) {
+    return match decode_bool(value, "ServerCapabilitiesInlineCompletionProvider") {
+      Ok(arm) => Ok(ServerCapabilitiesInlineCompletionProvider.Boolean(arm))
+      Err(e) => Err(e)
+    }
   }
-  match InlineCompletionOptions.from_json(value).map_err(|e| "ServerCapabilitiesInlineCompletionProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesInlineCompletionProvider.InlineCompletionOptions(arm))
-    Err(_) => {}
+  if is_object(value) {
+    return match InlineCompletionOptions.from_json(value).map_err(|e| "ServerCapabilitiesInlineCompletionProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesInlineCompletionProvider.InlineCompletionOptions(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("ServerCapabilitiesInlineCompletionProvider: matches none of Boolean, InlineCompletionOptions")
 }
@@ -8522,19 +8739,28 @@ fn ServerCapabilitiesInlineValueProvider.to_json(value: ServerCapabilitiesInline
   ServerCapabilitiesInlineValueProvider.InlineValueRegistrationOptions(arm) => InlineValueRegistrationOptions.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Boolean, then InlineValueRegistrationOptions, then InlineValueOptions.
+// Whether a value selects an arm of `ServerCapabilitiesInlineValueProvider`: the JSON kind of one, or every required member of a structure arm.
+fn ServerCapabilitiesInlineValueProvider.selects(value: Json) -> Bool = is_bool(value) || has_members(value, ["documentSelector"]) || is_object(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Boolean, then InlineValueRegistrationOptions, then InlineValueOptions.
 fn ServerCapabilitiesInlineValueProvider.from_json(value: Json) -> Result<ServerCapabilitiesInlineValueProvider, Text> {
-  match decode_bool(value, "ServerCapabilitiesInlineValueProvider") {
-    Ok(arm) => return Ok(ServerCapabilitiesInlineValueProvider.Boolean(arm))
-    Err(_) => {}
+  if is_bool(value) {
+    return match decode_bool(value, "ServerCapabilitiesInlineValueProvider") {
+      Ok(arm) => Ok(ServerCapabilitiesInlineValueProvider.Boolean(arm))
+      Err(e) => Err(e)
+    }
   }
-  match InlineValueRegistrationOptions.from_json(value).map_err(|e| "ServerCapabilitiesInlineValueProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesInlineValueProvider.InlineValueRegistrationOptions(arm))
-    Err(_) => {}
+  if has_members(value, ["documentSelector"]) {
+    return match InlineValueRegistrationOptions.from_json(value).map_err(|e| "ServerCapabilitiesInlineValueProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesInlineValueProvider.InlineValueRegistrationOptions(arm))
+      Err(e) => Err(e)
+    }
   }
-  match InlineValueOptions.from_json(value).map_err(|e| "ServerCapabilitiesInlineValueProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesInlineValueProvider.InlineValueOptions(arm))
-    Err(_) => {}
+  if is_object(value) {
+    return match InlineValueOptions.from_json(value).map_err(|e| "ServerCapabilitiesInlineValueProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesInlineValueProvider.InlineValueOptions(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("ServerCapabilitiesInlineValueProvider: matches none of Boolean, InlineValueRegistrationOptions, InlineValueOptions")
 }
@@ -8553,19 +8779,28 @@ fn ServerCapabilitiesLinkedEditingRangeProvider.to_json(value: ServerCapabilitie
   ServerCapabilitiesLinkedEditingRangeProvider.LinkedEditingRangeRegistrationOptions(arm) => LinkedEditingRangeRegistrationOptions.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Boolean, then LinkedEditingRangeRegistrationOptions, then LinkedEditingRangeOptions.
+// Whether a value selects an arm of `ServerCapabilitiesLinkedEditingRangeProvider`: the JSON kind of one, or every required member of a structure arm.
+fn ServerCapabilitiesLinkedEditingRangeProvider.selects(value: Json) -> Bool = is_bool(value) || has_members(value, ["documentSelector"]) || is_object(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Boolean, then LinkedEditingRangeRegistrationOptions, then LinkedEditingRangeOptions.
 fn ServerCapabilitiesLinkedEditingRangeProvider.from_json(value: Json) -> Result<ServerCapabilitiesLinkedEditingRangeProvider, Text> {
-  match decode_bool(value, "ServerCapabilitiesLinkedEditingRangeProvider") {
-    Ok(arm) => return Ok(ServerCapabilitiesLinkedEditingRangeProvider.Boolean(arm))
-    Err(_) => {}
+  if is_bool(value) {
+    return match decode_bool(value, "ServerCapabilitiesLinkedEditingRangeProvider") {
+      Ok(arm) => Ok(ServerCapabilitiesLinkedEditingRangeProvider.Boolean(arm))
+      Err(e) => Err(e)
+    }
   }
-  match LinkedEditingRangeRegistrationOptions.from_json(value).map_err(|e| "ServerCapabilitiesLinkedEditingRangeProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesLinkedEditingRangeProvider.LinkedEditingRangeRegistrationOptions(arm))
-    Err(_) => {}
+  if has_members(value, ["documentSelector"]) {
+    return match LinkedEditingRangeRegistrationOptions.from_json(value).map_err(|e| "ServerCapabilitiesLinkedEditingRangeProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesLinkedEditingRangeProvider.LinkedEditingRangeRegistrationOptions(arm))
+      Err(e) => Err(e)
+    }
   }
-  match LinkedEditingRangeOptions.from_json(value).map_err(|e| "ServerCapabilitiesLinkedEditingRangeProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesLinkedEditingRangeProvider.LinkedEditingRangeOptions(arm))
-    Err(_) => {}
+  if is_object(value) {
+    return match LinkedEditingRangeOptions.from_json(value).map_err(|e| "ServerCapabilitiesLinkedEditingRangeProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesLinkedEditingRangeProvider.LinkedEditingRangeOptions(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("ServerCapabilitiesLinkedEditingRangeProvider: matches none of Boolean, LinkedEditingRangeRegistrationOptions, LinkedEditingRangeOptions")
 }
@@ -8584,19 +8819,28 @@ fn ServerCapabilitiesMonikerProvider.to_json(value: ServerCapabilitiesMonikerPro
   ServerCapabilitiesMonikerProvider.MonikerRegistrationOptions(arm) => MonikerRegistrationOptions.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Boolean, then MonikerRegistrationOptions, then MonikerOptions.
+// Whether a value selects an arm of `ServerCapabilitiesMonikerProvider`: the JSON kind of one, or every required member of a structure arm.
+fn ServerCapabilitiesMonikerProvider.selects(value: Json) -> Bool = is_bool(value) || has_members(value, ["documentSelector"]) || is_object(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Boolean, then MonikerRegistrationOptions, then MonikerOptions.
 fn ServerCapabilitiesMonikerProvider.from_json(value: Json) -> Result<ServerCapabilitiesMonikerProvider, Text> {
-  match decode_bool(value, "ServerCapabilitiesMonikerProvider") {
-    Ok(arm) => return Ok(ServerCapabilitiesMonikerProvider.Boolean(arm))
-    Err(_) => {}
+  if is_bool(value) {
+    return match decode_bool(value, "ServerCapabilitiesMonikerProvider") {
+      Ok(arm) => Ok(ServerCapabilitiesMonikerProvider.Boolean(arm))
+      Err(e) => Err(e)
+    }
   }
-  match MonikerRegistrationOptions.from_json(value).map_err(|e| "ServerCapabilitiesMonikerProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesMonikerProvider.MonikerRegistrationOptions(arm))
-    Err(_) => {}
+  if has_members(value, ["documentSelector"]) {
+    return match MonikerRegistrationOptions.from_json(value).map_err(|e| "ServerCapabilitiesMonikerProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesMonikerProvider.MonikerRegistrationOptions(arm))
+      Err(e) => Err(e)
+    }
   }
-  match MonikerOptions.from_json(value).map_err(|e| "ServerCapabilitiesMonikerProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesMonikerProvider.MonikerOptions(arm))
-    Err(_) => {}
+  if is_object(value) {
+    return match MonikerOptions.from_json(value).map_err(|e| "ServerCapabilitiesMonikerProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesMonikerProvider.MonikerOptions(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("ServerCapabilitiesMonikerProvider: matches none of Boolean, MonikerRegistrationOptions, MonikerOptions")
 }
@@ -8613,15 +8857,22 @@ fn ServerCapabilitiesNotebookDocumentSync.to_json(value: ServerCapabilitiesNoteb
   ServerCapabilitiesNotebookDocumentSync.NotebookDocumentSyncRegistrationOptions(arm) => NotebookDocumentSyncRegistrationOptions.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: NotebookDocumentSyncRegistrationOptions, then NotebookDocumentSyncOptions.
+// Whether a value selects an arm of `ServerCapabilitiesNotebookDocumentSync`: the JSON kind of one, or every required member of a structure arm.
+fn ServerCapabilitiesNotebookDocumentSync.selects(value: Json) -> Bool = has_members(value, ["notebookSelector"]) || has_members(value, ["notebookSelector"])
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: NotebookDocumentSyncRegistrationOptions, then NotebookDocumentSyncOptions.
 fn ServerCapabilitiesNotebookDocumentSync.from_json(value: Json) -> Result<ServerCapabilitiesNotebookDocumentSync, Text> {
-  match NotebookDocumentSyncRegistrationOptions.from_json(value).map_err(|e| "ServerCapabilitiesNotebookDocumentSync" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesNotebookDocumentSync.NotebookDocumentSyncRegistrationOptions(arm))
-    Err(_) => {}
+  if has_members(value, ["notebookSelector"]) {
+    return match NotebookDocumentSyncRegistrationOptions.from_json(value).map_err(|e| "ServerCapabilitiesNotebookDocumentSync" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesNotebookDocumentSync.NotebookDocumentSyncRegistrationOptions(arm))
+      Err(e) => Err(e)
+    }
   }
-  match NotebookDocumentSyncOptions.from_json(value).map_err(|e| "ServerCapabilitiesNotebookDocumentSync" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesNotebookDocumentSync.NotebookDocumentSyncOptions(arm))
-    Err(_) => {}
+  if has_members(value, ["notebookSelector"]) {
+    return match NotebookDocumentSyncOptions.from_json(value).map_err(|e| "ServerCapabilitiesNotebookDocumentSync" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesNotebookDocumentSync.NotebookDocumentSyncOptions(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("ServerCapabilitiesNotebookDocumentSync: matches none of NotebookDocumentSyncRegistrationOptions, NotebookDocumentSyncOptions")
 }
@@ -8638,15 +8889,22 @@ fn ServerCapabilitiesReferencesProvider.to_json(value: ServerCapabilitiesReferen
   ServerCapabilitiesReferencesProvider.ReferenceOptions(arm) => ReferenceOptions.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Boolean, then ReferenceOptions.
+// Whether a value selects an arm of `ServerCapabilitiesReferencesProvider`: the JSON kind of one, or every required member of a structure arm.
+fn ServerCapabilitiesReferencesProvider.selects(value: Json) -> Bool = is_bool(value) || is_object(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Boolean, then ReferenceOptions.
 fn ServerCapabilitiesReferencesProvider.from_json(value: Json) -> Result<ServerCapabilitiesReferencesProvider, Text> {
-  match decode_bool(value, "ServerCapabilitiesReferencesProvider") {
-    Ok(arm) => return Ok(ServerCapabilitiesReferencesProvider.Boolean(arm))
-    Err(_) => {}
+  if is_bool(value) {
+    return match decode_bool(value, "ServerCapabilitiesReferencesProvider") {
+      Ok(arm) => Ok(ServerCapabilitiesReferencesProvider.Boolean(arm))
+      Err(e) => Err(e)
+    }
   }
-  match ReferenceOptions.from_json(value).map_err(|e| "ServerCapabilitiesReferencesProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesReferencesProvider.ReferenceOptions(arm))
-    Err(_) => {}
+  if is_object(value) {
+    return match ReferenceOptions.from_json(value).map_err(|e| "ServerCapabilitiesReferencesProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesReferencesProvider.ReferenceOptions(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("ServerCapabilitiesReferencesProvider: matches none of Boolean, ReferenceOptions")
 }
@@ -8663,15 +8921,22 @@ fn ServerCapabilitiesRenameProvider.to_json(value: ServerCapabilitiesRenameProvi
   ServerCapabilitiesRenameProvider.RenameOptions(arm) => RenameOptions.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Boolean, then RenameOptions.
+// Whether a value selects an arm of `ServerCapabilitiesRenameProvider`: the JSON kind of one, or every required member of a structure arm.
+fn ServerCapabilitiesRenameProvider.selects(value: Json) -> Bool = is_bool(value) || is_object(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Boolean, then RenameOptions.
 fn ServerCapabilitiesRenameProvider.from_json(value: Json) -> Result<ServerCapabilitiesRenameProvider, Text> {
-  match decode_bool(value, "ServerCapabilitiesRenameProvider") {
-    Ok(arm) => return Ok(ServerCapabilitiesRenameProvider.Boolean(arm))
-    Err(_) => {}
+  if is_bool(value) {
+    return match decode_bool(value, "ServerCapabilitiesRenameProvider") {
+      Ok(arm) => Ok(ServerCapabilitiesRenameProvider.Boolean(arm))
+      Err(e) => Err(e)
+    }
   }
-  match RenameOptions.from_json(value).map_err(|e| "ServerCapabilitiesRenameProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesRenameProvider.RenameOptions(arm))
-    Err(_) => {}
+  if is_object(value) {
+    return match RenameOptions.from_json(value).map_err(|e| "ServerCapabilitiesRenameProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesRenameProvider.RenameOptions(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("ServerCapabilitiesRenameProvider: matches none of Boolean, RenameOptions")
 }
@@ -8690,19 +8955,28 @@ fn ServerCapabilitiesSelectionRangeProvider.to_json(value: ServerCapabilitiesSel
   ServerCapabilitiesSelectionRangeProvider.SelectionRangeRegistrationOptions(arm) => SelectionRangeRegistrationOptions.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Boolean, then SelectionRangeRegistrationOptions, then SelectionRangeOptions.
+// Whether a value selects an arm of `ServerCapabilitiesSelectionRangeProvider`: the JSON kind of one, or every required member of a structure arm.
+fn ServerCapabilitiesSelectionRangeProvider.selects(value: Json) -> Bool = is_bool(value) || has_members(value, ["documentSelector"]) || is_object(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Boolean, then SelectionRangeRegistrationOptions, then SelectionRangeOptions.
 fn ServerCapabilitiesSelectionRangeProvider.from_json(value: Json) -> Result<ServerCapabilitiesSelectionRangeProvider, Text> {
-  match decode_bool(value, "ServerCapabilitiesSelectionRangeProvider") {
-    Ok(arm) => return Ok(ServerCapabilitiesSelectionRangeProvider.Boolean(arm))
-    Err(_) => {}
+  if is_bool(value) {
+    return match decode_bool(value, "ServerCapabilitiesSelectionRangeProvider") {
+      Ok(arm) => Ok(ServerCapabilitiesSelectionRangeProvider.Boolean(arm))
+      Err(e) => Err(e)
+    }
   }
-  match SelectionRangeRegistrationOptions.from_json(value).map_err(|e| "ServerCapabilitiesSelectionRangeProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesSelectionRangeProvider.SelectionRangeRegistrationOptions(arm))
-    Err(_) => {}
+  if has_members(value, ["documentSelector"]) {
+    return match SelectionRangeRegistrationOptions.from_json(value).map_err(|e| "ServerCapabilitiesSelectionRangeProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesSelectionRangeProvider.SelectionRangeRegistrationOptions(arm))
+      Err(e) => Err(e)
+    }
   }
-  match SelectionRangeOptions.from_json(value).map_err(|e| "ServerCapabilitiesSelectionRangeProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesSelectionRangeProvider.SelectionRangeOptions(arm))
-    Err(_) => {}
+  if is_object(value) {
+    return match SelectionRangeOptions.from_json(value).map_err(|e| "ServerCapabilitiesSelectionRangeProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesSelectionRangeProvider.SelectionRangeOptions(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("ServerCapabilitiesSelectionRangeProvider: matches none of Boolean, SelectionRangeRegistrationOptions, SelectionRangeOptions")
 }
@@ -8719,15 +8993,22 @@ fn ServerCapabilitiesSemanticTokensProvider.to_json(value: ServerCapabilitiesSem
   ServerCapabilitiesSemanticTokensProvider.SemanticTokensRegistrationOptions(arm) => SemanticTokensRegistrationOptions.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: SemanticTokensRegistrationOptions, then SemanticTokensOptions.
+// Whether a value selects an arm of `ServerCapabilitiesSemanticTokensProvider`: the JSON kind of one, or every required member of a structure arm.
+fn ServerCapabilitiesSemanticTokensProvider.selects(value: Json) -> Bool = has_members(value, ["documentSelector", "legend"]) || has_members(value, ["legend"])
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: SemanticTokensRegistrationOptions, then SemanticTokensOptions.
 fn ServerCapabilitiesSemanticTokensProvider.from_json(value: Json) -> Result<ServerCapabilitiesSemanticTokensProvider, Text> {
-  match SemanticTokensRegistrationOptions.from_json(value).map_err(|e| "ServerCapabilitiesSemanticTokensProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesSemanticTokensProvider.SemanticTokensRegistrationOptions(arm))
-    Err(_) => {}
+  if has_members(value, ["documentSelector", "legend"]) {
+    return match SemanticTokensRegistrationOptions.from_json(value).map_err(|e| "ServerCapabilitiesSemanticTokensProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesSemanticTokensProvider.SemanticTokensRegistrationOptions(arm))
+      Err(e) => Err(e)
+    }
   }
-  match SemanticTokensOptions.from_json(value).map_err(|e| "ServerCapabilitiesSemanticTokensProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesSemanticTokensProvider.SemanticTokensOptions(arm))
-    Err(_) => {}
+  if has_members(value, ["legend"]) {
+    return match SemanticTokensOptions.from_json(value).map_err(|e| "ServerCapabilitiesSemanticTokensProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesSemanticTokensProvider.SemanticTokensOptions(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("ServerCapabilitiesSemanticTokensProvider: matches none of SemanticTokensRegistrationOptions, SemanticTokensOptions")
 }
@@ -8744,15 +9025,22 @@ fn ServerCapabilitiesTextDocumentSync.to_json(value: ServerCapabilitiesTextDocum
   ServerCapabilitiesTextDocumentSync.TextDocumentSyncKind(arm) => TextDocumentSyncKind.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: TextDocumentSyncKind, then TextDocumentSyncOptions.
+// Whether a value selects an arm of `ServerCapabilitiesTextDocumentSync`: the JSON kind of one, or every required member of a structure arm.
+fn ServerCapabilitiesTextDocumentSync.selects(value: Json) -> Bool = is_number(value) || is_object(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: TextDocumentSyncKind, then TextDocumentSyncOptions.
 fn ServerCapabilitiesTextDocumentSync.from_json(value: Json) -> Result<ServerCapabilitiesTextDocumentSync, Text> {
-  match TextDocumentSyncKind.from_json(value).map_err(|e| "ServerCapabilitiesTextDocumentSync" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesTextDocumentSync.TextDocumentSyncKind(arm))
-    Err(_) => {}
+  if is_number(value) {
+    return match TextDocumentSyncKind.from_json(value).map_err(|e| "ServerCapabilitiesTextDocumentSync" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesTextDocumentSync.TextDocumentSyncKind(arm))
+      Err(e) => Err(e)
+    }
   }
-  match TextDocumentSyncOptions.from_json(value).map_err(|e| "ServerCapabilitiesTextDocumentSync" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesTextDocumentSync.TextDocumentSyncOptions(arm))
-    Err(_) => {}
+  if is_object(value) {
+    return match TextDocumentSyncOptions.from_json(value).map_err(|e| "ServerCapabilitiesTextDocumentSync" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesTextDocumentSync.TextDocumentSyncOptions(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("ServerCapabilitiesTextDocumentSync: matches none of TextDocumentSyncKind, TextDocumentSyncOptions")
 }
@@ -8771,19 +9059,28 @@ fn ServerCapabilitiesTypeDefinitionProvider.to_json(value: ServerCapabilitiesTyp
   ServerCapabilitiesTypeDefinitionProvider.TypeDefinitionRegistrationOptions(arm) => TypeDefinitionRegistrationOptions.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Boolean, then TypeDefinitionRegistrationOptions, then TypeDefinitionOptions.
+// Whether a value selects an arm of `ServerCapabilitiesTypeDefinitionProvider`: the JSON kind of one, or every required member of a structure arm.
+fn ServerCapabilitiesTypeDefinitionProvider.selects(value: Json) -> Bool = is_bool(value) || has_members(value, ["documentSelector"]) || is_object(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Boolean, then TypeDefinitionRegistrationOptions, then TypeDefinitionOptions.
 fn ServerCapabilitiesTypeDefinitionProvider.from_json(value: Json) -> Result<ServerCapabilitiesTypeDefinitionProvider, Text> {
-  match decode_bool(value, "ServerCapabilitiesTypeDefinitionProvider") {
-    Ok(arm) => return Ok(ServerCapabilitiesTypeDefinitionProvider.Boolean(arm))
-    Err(_) => {}
+  if is_bool(value) {
+    return match decode_bool(value, "ServerCapabilitiesTypeDefinitionProvider") {
+      Ok(arm) => Ok(ServerCapabilitiesTypeDefinitionProvider.Boolean(arm))
+      Err(e) => Err(e)
+    }
   }
-  match TypeDefinitionRegistrationOptions.from_json(value).map_err(|e| "ServerCapabilitiesTypeDefinitionProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesTypeDefinitionProvider.TypeDefinitionRegistrationOptions(arm))
-    Err(_) => {}
+  if has_members(value, ["documentSelector"]) {
+    return match TypeDefinitionRegistrationOptions.from_json(value).map_err(|e| "ServerCapabilitiesTypeDefinitionProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesTypeDefinitionProvider.TypeDefinitionRegistrationOptions(arm))
+      Err(e) => Err(e)
+    }
   }
-  match TypeDefinitionOptions.from_json(value).map_err(|e| "ServerCapabilitiesTypeDefinitionProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesTypeDefinitionProvider.TypeDefinitionOptions(arm))
-    Err(_) => {}
+  if is_object(value) {
+    return match TypeDefinitionOptions.from_json(value).map_err(|e| "ServerCapabilitiesTypeDefinitionProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesTypeDefinitionProvider.TypeDefinitionOptions(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("ServerCapabilitiesTypeDefinitionProvider: matches none of Boolean, TypeDefinitionRegistrationOptions, TypeDefinitionOptions")
 }
@@ -8802,19 +9099,28 @@ fn ServerCapabilitiesTypeHierarchyProvider.to_json(value: ServerCapabilitiesType
   ServerCapabilitiesTypeHierarchyProvider.TypeHierarchyRegistrationOptions(arm) => TypeHierarchyRegistrationOptions.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Boolean, then TypeHierarchyRegistrationOptions, then TypeHierarchyOptions.
+// Whether a value selects an arm of `ServerCapabilitiesTypeHierarchyProvider`: the JSON kind of one, or every required member of a structure arm.
+fn ServerCapabilitiesTypeHierarchyProvider.selects(value: Json) -> Bool = is_bool(value) || has_members(value, ["documentSelector"]) || is_object(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Boolean, then TypeHierarchyRegistrationOptions, then TypeHierarchyOptions.
 fn ServerCapabilitiesTypeHierarchyProvider.from_json(value: Json) -> Result<ServerCapabilitiesTypeHierarchyProvider, Text> {
-  match decode_bool(value, "ServerCapabilitiesTypeHierarchyProvider") {
-    Ok(arm) => return Ok(ServerCapabilitiesTypeHierarchyProvider.Boolean(arm))
-    Err(_) => {}
+  if is_bool(value) {
+    return match decode_bool(value, "ServerCapabilitiesTypeHierarchyProvider") {
+      Ok(arm) => Ok(ServerCapabilitiesTypeHierarchyProvider.Boolean(arm))
+      Err(e) => Err(e)
+    }
   }
-  match TypeHierarchyRegistrationOptions.from_json(value).map_err(|e| "ServerCapabilitiesTypeHierarchyProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesTypeHierarchyProvider.TypeHierarchyRegistrationOptions(arm))
-    Err(_) => {}
+  if has_members(value, ["documentSelector"]) {
+    return match TypeHierarchyRegistrationOptions.from_json(value).map_err(|e| "ServerCapabilitiesTypeHierarchyProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesTypeHierarchyProvider.TypeHierarchyRegistrationOptions(arm))
+      Err(e) => Err(e)
+    }
   }
-  match TypeHierarchyOptions.from_json(value).map_err(|e| "ServerCapabilitiesTypeHierarchyProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesTypeHierarchyProvider.TypeHierarchyOptions(arm))
-    Err(_) => {}
+  if is_object(value) {
+    return match TypeHierarchyOptions.from_json(value).map_err(|e| "ServerCapabilitiesTypeHierarchyProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesTypeHierarchyProvider.TypeHierarchyOptions(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("ServerCapabilitiesTypeHierarchyProvider: matches none of Boolean, TypeHierarchyRegistrationOptions, TypeHierarchyOptions")
 }
@@ -8831,15 +9137,22 @@ fn ServerCapabilitiesWorkspaceSymbolProvider.to_json(value: ServerCapabilitiesWo
   ServerCapabilitiesWorkspaceSymbolProvider.WorkspaceSymbolOptions(arm) => WorkspaceSymbolOptions.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Boolean, then WorkspaceSymbolOptions.
+// Whether a value selects an arm of `ServerCapabilitiesWorkspaceSymbolProvider`: the JSON kind of one, or every required member of a structure arm.
+fn ServerCapabilitiesWorkspaceSymbolProvider.selects(value: Json) -> Bool = is_bool(value) || is_object(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Boolean, then WorkspaceSymbolOptions.
 fn ServerCapabilitiesWorkspaceSymbolProvider.from_json(value: Json) -> Result<ServerCapabilitiesWorkspaceSymbolProvider, Text> {
-  match decode_bool(value, "ServerCapabilitiesWorkspaceSymbolProvider") {
-    Ok(arm) => return Ok(ServerCapabilitiesWorkspaceSymbolProvider.Boolean(arm))
-    Err(_) => {}
+  if is_bool(value) {
+    return match decode_bool(value, "ServerCapabilitiesWorkspaceSymbolProvider") {
+      Ok(arm) => Ok(ServerCapabilitiesWorkspaceSymbolProvider.Boolean(arm))
+      Err(e) => Err(e)
+    }
   }
-  match WorkspaceSymbolOptions.from_json(value).map_err(|e| "ServerCapabilitiesWorkspaceSymbolProvider" + ": " + e) {
-    Ok(arm) => return Ok(ServerCapabilitiesWorkspaceSymbolProvider.WorkspaceSymbolOptions(arm))
-    Err(_) => {}
+  if is_object(value) {
+    return match WorkspaceSymbolOptions.from_json(value).map_err(|e| "ServerCapabilitiesWorkspaceSymbolProvider" + ": " + e) {
+      Ok(arm) => Ok(ServerCapabilitiesWorkspaceSymbolProvider.WorkspaceSymbolOptions(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("ServerCapabilitiesWorkspaceSymbolProvider: matches none of Boolean, WorkspaceSymbolOptions")
 }
@@ -8856,15 +9169,22 @@ fn TextDocumentContentChangeEvent.to_json(value: TextDocumentContentChangeEvent)
   TextDocumentContentChangeEvent.TextDocumentContentChangeEventLiteral2(arm) => TextDocumentContentChangeEventLiteral2.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: TextDocumentContentChangeEventLiteral1, then TextDocumentContentChangeEventLiteral2.
+// Whether a value selects an arm of `TextDocumentContentChangeEvent`: the JSON kind of one, or every required member of a structure arm.
+fn TextDocumentContentChangeEvent.selects(value: Json) -> Bool = has_members(value, ["range", "text"]) || has_members(value, ["text"])
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: TextDocumentContentChangeEventLiteral1, then TextDocumentContentChangeEventLiteral2.
 fn TextDocumentContentChangeEvent.from_json(value: Json) -> Result<TextDocumentContentChangeEvent, Text> {
-  match TextDocumentContentChangeEventLiteral1.from_json(value).map_err(|e| "TextDocumentContentChangeEvent" + ": " + e) {
-    Ok(arm) => return Ok(TextDocumentContentChangeEvent.TextDocumentContentChangeEventLiteral1(arm))
-    Err(_) => {}
+  if has_members(value, ["range", "text"]) {
+    return match TextDocumentContentChangeEventLiteral1.from_json(value).map_err(|e| "TextDocumentContentChangeEvent" + ": " + e) {
+      Ok(arm) => Ok(TextDocumentContentChangeEvent.TextDocumentContentChangeEventLiteral1(arm))
+      Err(e) => Err(e)
+    }
   }
-  match TextDocumentContentChangeEventLiteral2.from_json(value).map_err(|e| "TextDocumentContentChangeEvent" + ": " + e) {
-    Ok(arm) => return Ok(TextDocumentContentChangeEvent.TextDocumentContentChangeEventLiteral2(arm))
-    Err(_) => {}
+  if has_members(value, ["text"]) {
+    return match TextDocumentContentChangeEventLiteral2.from_json(value).map_err(|e| "TextDocumentContentChangeEvent" + ": " + e) {
+      Ok(arm) => Ok(TextDocumentContentChangeEvent.TextDocumentContentChangeEventLiteral2(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("TextDocumentContentChangeEvent: matches none of TextDocumentContentChangeEventLiteral1, TextDocumentContentChangeEventLiteral2")
 }
@@ -8883,19 +9203,28 @@ fn TextDocumentFilter.to_json(value: TextDocumentFilter) -> Json = match value {
   TextDocumentFilter.TextDocumentFilterLiteral3(arm) => TextDocumentFilterLiteral3.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: TextDocumentFilterLiteral1, then TextDocumentFilterLiteral2, then TextDocumentFilterLiteral3.
+// Whether a value selects an arm of `TextDocumentFilter`: the JSON kind of one, or every required member of a structure arm.
+fn TextDocumentFilter.selects(value: Json) -> Bool = has_members(value, ["language"]) || has_members(value, ["scheme"]) || has_members(value, ["pattern"])
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: TextDocumentFilterLiteral1, then TextDocumentFilterLiteral2, then TextDocumentFilterLiteral3.
 fn TextDocumentFilter.from_json(value: Json) -> Result<TextDocumentFilter, Text> {
-  match TextDocumentFilterLiteral1.from_json(value).map_err(|e| "TextDocumentFilter" + ": " + e) {
-    Ok(arm) => return Ok(TextDocumentFilter.TextDocumentFilterLiteral1(arm))
-    Err(_) => {}
+  if has_members(value, ["language"]) {
+    return match TextDocumentFilterLiteral1.from_json(value).map_err(|e| "TextDocumentFilter" + ": " + e) {
+      Ok(arm) => Ok(TextDocumentFilter.TextDocumentFilterLiteral1(arm))
+      Err(e) => Err(e)
+    }
   }
-  match TextDocumentFilterLiteral2.from_json(value).map_err(|e| "TextDocumentFilter" + ": " + e) {
-    Ok(arm) => return Ok(TextDocumentFilter.TextDocumentFilterLiteral2(arm))
-    Err(_) => {}
+  if has_members(value, ["scheme"]) {
+    return match TextDocumentFilterLiteral2.from_json(value).map_err(|e| "TextDocumentFilter" + ": " + e) {
+      Ok(arm) => Ok(TextDocumentFilter.TextDocumentFilterLiteral2(arm))
+      Err(e) => Err(e)
+    }
   }
-  match TextDocumentFilterLiteral3.from_json(value).map_err(|e| "TextDocumentFilter" + ": " + e) {
-    Ok(arm) => return Ok(TextDocumentFilter.TextDocumentFilterLiteral3(arm))
-    Err(_) => {}
+  if has_members(value, ["pattern"]) {
+    return match TextDocumentFilterLiteral3.from_json(value).map_err(|e| "TextDocumentFilter" + ": " + e) {
+      Ok(arm) => Ok(TextDocumentFilter.TextDocumentFilterLiteral3(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("TextDocumentFilter: matches none of TextDocumentFilterLiteral1, TextDocumentFilterLiteral2, TextDocumentFilterLiteral3")
 }
@@ -8912,15 +9241,22 @@ fn TextDocumentSyncOptionsSave.to_json(value: TextDocumentSyncOptionsSave) -> Js
   TextDocumentSyncOptionsSave.SaveOptions(arm) => SaveOptions.to_json(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Boolean, then SaveOptions.
+// Whether a value selects an arm of `TextDocumentSyncOptionsSave`: the JSON kind of one, or every required member of a structure arm.
+fn TextDocumentSyncOptionsSave.selects(value: Json) -> Bool = is_bool(value) || is_object(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Boolean, then SaveOptions.
 fn TextDocumentSyncOptionsSave.from_json(value: Json) -> Result<TextDocumentSyncOptionsSave, Text> {
-  match decode_bool(value, "TextDocumentSyncOptionsSave") {
-    Ok(arm) => return Ok(TextDocumentSyncOptionsSave.Boolean(arm))
-    Err(_) => {}
+  if is_bool(value) {
+    return match decode_bool(value, "TextDocumentSyncOptionsSave") {
+      Ok(arm) => Ok(TextDocumentSyncOptionsSave.Boolean(arm))
+      Err(e) => Err(e)
+    }
   }
-  match SaveOptions.from_json(value).map_err(|e| "TextDocumentSyncOptionsSave" + ": " + e) {
-    Ok(arm) => return Ok(TextDocumentSyncOptionsSave.SaveOptions(arm))
-    Err(_) => {}
+  if is_object(value) {
+    return match SaveOptions.from_json(value).map_err(|e| "TextDocumentSyncOptionsSave" + ": " + e) {
+      Ok(arm) => Ok(TextDocumentSyncOptionsSave.SaveOptions(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("TextDocumentSyncOptionsSave: matches none of Boolean, SaveOptions")
 }
@@ -8937,15 +9273,22 @@ fn WorkspaceFoldersServerCapabilitiesChangeNotifications.to_json(value: Workspac
   WorkspaceFoldersServerCapabilitiesChangeNotifications.Boolean(arm) => Json.Bool(arm)
 }
 
-// Decoded by shape, the first arm that decodes wins: Boolean, then String.
+// Whether a value selects an arm of `WorkspaceFoldersServerCapabilitiesChangeNotifications`: the JSON kind of one, or every required member of a structure arm.
+fn WorkspaceFoldersServerCapabilitiesChangeNotifications.selects(value: Json) -> Bool = is_bool(value) || is_string(value)
+
+// Decoded by shape: the first arm the value selects decodes it, or its error is the union's: Boolean, then String.
 fn WorkspaceFoldersServerCapabilitiesChangeNotifications.from_json(value: Json) -> Result<WorkspaceFoldersServerCapabilitiesChangeNotifications, Text> {
-  match decode_bool(value, "WorkspaceFoldersServerCapabilitiesChangeNotifications") {
-    Ok(arm) => return Ok(WorkspaceFoldersServerCapabilitiesChangeNotifications.Boolean(arm))
-    Err(_) => {}
+  if is_bool(value) {
+    return match decode_bool(value, "WorkspaceFoldersServerCapabilitiesChangeNotifications") {
+      Ok(arm) => Ok(WorkspaceFoldersServerCapabilitiesChangeNotifications.Boolean(arm))
+      Err(e) => Err(e)
+    }
   }
-  match decode_text(value, "WorkspaceFoldersServerCapabilitiesChangeNotifications") {
-    Ok(arm) => return Ok(WorkspaceFoldersServerCapabilitiesChangeNotifications.String(arm))
-    Err(_) => {}
+  if is_string(value) {
+    return match decode_text(value, "WorkspaceFoldersServerCapabilitiesChangeNotifications") {
+      Ok(arm) => Ok(WorkspaceFoldersServerCapabilitiesChangeNotifications.String(arm))
+      Err(e) => Err(e)
+    }
   }
   Err("WorkspaceFoldersServerCapabilitiesChangeNotifications: matches none of Boolean, String")
 }
@@ -8977,6 +9320,44 @@ fn decode_text(value: Json, at: Text) -> Result<Text, Text> = match value {
 fn decode_uinteger(value: Json, at: Text) -> Result<Int, Text> = match value {
   Json.Number(n) => if n >= 0 && n <= 2147483647 { Ok(n) } else { Err(at + ": uinteger out of range") }
   _ => Err(at + ": expected an unsigned integer")
+}
+
+// Whether a value is a JSON object with a member of each of `names`, null or not.
+fn has_members(value: Json, names: List<Text>) -> Bool {
+  if !is_object(value) {
+    return false
+  }
+  for name in names {
+    if value.get(name) == Option.None {
+      return false
+    }
+  }
+  true
+}
+
+// Whether a value is a JSON boolean.
+fn is_bool(value: Json) -> Bool = match value {
+  Json.Bool(_) => true
+  _ => false
+}
+
+// Whether a value is a JSON number.
+fn is_number(value: Json) -> Bool = match value {
+  Json.Number(_) => true
+  Json.Decimal(_) => true
+  _ => false
+}
+
+// Whether a value is a JSON object.
+fn is_object(value: Json) -> Bool = match value {
+  Json.Object(_) => true
+  _ => false
+}
+
+// Whether a value is a JSON string.
+fn is_string(value: Json) -> Bool = match value {
+  Json.Str(_) => true
+  _ => false
 }
 
 // A JSON array of CodeActionKind.

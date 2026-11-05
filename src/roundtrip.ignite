@@ -1,6 +1,6 @@
 package examples.lsp
 
-import std.json.{Json, parse}
+import std.json.{Json, parse, get}
 import std.protocol.jsonrpc.{Message, Id, decode, encode_message}
 import examples.lsp.lsp_types.{
   METHOD_INITIALIZE, METHOD_INITIALIZED, METHOD_SHUTDOWN, METHOD_EXIT,
@@ -10,7 +10,7 @@ import examples.lsp.lsp_types.{
   DidChangeTextDocumentParams, DidCloseTextDocumentParams, PublishDiagnosticsParams, CancelParams,
   CancelParamsId, TextDocumentContentChangeEvent, ServerCapabilitiesSemanticTokensProvider,
   ServerCapabilitiesTextDocumentSync, TextDocumentSyncKind, DiagnosticCode, DiagnosticSeverity,
-  Position, PositionEncodingKind, TraceValues, DocumentFilter
+  Position, PositionEncodingKind, TraceValues, DiagnosticTag, DocumentFilter
 }
 
 // Round trips of the generated LSP types (`lsp_types.ignite`, story:lsp-types): for each root
@@ -283,6 +283,53 @@ test "a value of the wrong shape is refused with its place" {
 }
 
 // ---- adversary cases (review of story:lsp-types) ----------------------------------------
+
+test const HELIX_INITIALIZE: Text = r#"{"jsonrpc":"2.0","method":"initialize","params":{"capabilities":{"general":{"positionEncodings":["utf-8","utf-32","utf-16"]},"textDocument":{"codeAction":{"codeActionLiteralSupport":{"codeActionKind":{"valueSet":["","quickfix","refactor","refactor.extract","refactor.inline","refactor.rewrite","source","source.organizeImports"]}},"dataSupport":true,"disabledSupport":true,"isPreferredSupport":true,"resolveSupport":{"properties":["edit","command"]}},"completion":{"completionItem":{"deprecatedSupport":true,"insertReplaceSupport":true,"resolveSupport":{"properties":["documentation","detail","additionalTextEdits"]},"snippetSupport":true,"tagSupport":{"valueSet":[1]}},"completionItemKind":{}},"formatting":{"dynamicRegistration":false},"hover":{"contentFormat":["markdown"]},"inlayHint":{"dynamicRegistration":false},"publishDiagnostics":{"tagSupport":{"valueSet":[1,2]},"versionSupport":true},"rename":{"dynamicRegistration":false,"honorsChangeAnnotations":false,"prepareSupport":true},"signatureHelp":{"signatureInformation":{"activeParameterSupport":true,"documentationFormat":["markdown"],"parameterInformation":{"labelOffsetSupport":true}}}},"window":{"workDoneProgress":true},"workspace":{"applyEdit":true,"configuration":true,"didChangeConfiguration":{"dynamicRegistration":false},"didChangeWatchedFiles":{"dynamicRegistration":true,"relativePatternSupport":false},"executeCommand":{"dynamicRegistration":false},"fileOperations":{"didRename":true,"willRename":true},"inlayHint":{"refreshSupport":false},"symbol":{"dynamicRegistration":false},"workspaceEdit":{"documentChanges":true,"failureHandling":"abort","normalizesLineEndings":false,"resourceOperations":["create","rename","delete"]},"workspaceFolders":true}},"clientInfo":{"name":"helix","version":"25.07.1 (001efa80)"},"processId":4078898,"rootPath":"/work/proj","rootUri":null,"workspaceFolders":[]},"id":0}"#
+
+test "adversary: a captured helix 25.07 initialize decodes and re-encodes equal" {
+  let (method, params) = call_of(HELIX_INITIALIZE)?
+  assert method == METHOD_INITIALIZE
+  let json = params?
+  let decoded = InitializeParams.from_json(json)?
+  assert decoded.root_uri == Option.None
+  assert decoded.workspace_folders == Some(Some([]))
+  assert canonical(InitializeParams.to_json(decoded)) == canonical(json)
+}
+
+test "adversary: absent, null and a value stay apart through decode and encode" {
+  let absent = InitializeParams.from_json(parse(r#"{"processId": null, "rootUri": null, "capabilities": {}}"#)?)?
+  assert absent.workspace_folders == Option.None
+  assert absent.root_path == Option.None
+  assert InitializeParams.to_json(absent).get("workspaceFolders") == Option.None
+  let null = InitializeParams.from_json(parse(r#"{"processId": null, "rootUri": null, "capabilities": {}, "workspaceFolders": null}"#)?)?
+  assert null.workspace_folders == Some(Option.None)
+  assert InitializeParams.to_json(null).get("workspaceFolders") == Some(Json.Null)
+  let value = InitializeParams.from_json(parse(r#"{"processId": null, "rootUri": null, "capabilities": {}, "workspaceFolders": []}"#)?)?
+  assert value.workspace_folders == Some(Some([]))
+  assert InitializeParams.to_json(value).get("workspaceFolders") == Some(Json.Array([]))
+}
+
+test "adversary: a closed enumeration refuses a value it does not list, a custom one keeps it" {
+  assert DiagnosticTag.from_json(Json.Number(3)) == Err("DiagnosticTag: not one of its values")
+  assert PositionEncodingKind.from_json(Json.Str("utf-7")) == Ok(PositionEncodingKind.Custom("utf-7"))
+}
+
+test "adversary: uinteger accepts 2^31 - 1 and refuses 2^31 and negatives (LSP 3.17 Base Types)" {
+  assert Position.from_json(parse(r#"{"line": 2147483647, "character": 0}"#)?)?.line == 2147483647
+  assert Position.from_json(parse(r#"{"line": 2147483648, "character": 0}"#)?) == Err("Position.line: uinteger out of range")
+  assert Position.from_json(parse(r#"{"line": 0, "character": -1}"#)?) == Err("Position.character: uinteger out of range")
+}
+
+test "adversary: a decimal diagnostic code matches no arm" {
+  match DiagnosticCode.from_json(parse("1.5")?) {
+    Err(_) => {}
+    Ok(other) => { assert false, "a decimal code decoded as {other.debug()}" }
+  }
+  match DiagnosticCode.from_json(parse("1.0")?) {
+    Err(_) => {}
+    Ok(other) => { assert false, "1.0 decoded as {other.debug()}" }
+  }
+}
 
 // TextDocumentContentChangeEvent is `{range, rangeLength?, text} | {text}`. An incremental
 // change whose range does not decode must be refused: falling through to the `{text}` arm
