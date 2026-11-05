@@ -1,0 +1,25 @@
+[package]
+name = "ignite-lsp-types"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Generates the Ignite module of LSP message types from the LSP metaModel.json; never linked into compiled programs."
+autotests = false
+
+[lib]
+test = false
+bench = false
+
+[[bin]]
+name = "ignite-lsp-types"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+clap.workspace = true
+sha2 = "0.10"
+
+[[test]]
+name = "main"
+path = "tests/main.rs"

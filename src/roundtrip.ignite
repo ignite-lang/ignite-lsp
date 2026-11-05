@@ -1,0 +1,283 @@
+package examples.lsp
+
+import std.json.{Json, parse}
+import std.protocol.jsonrpc.{Message, Id, decode, encode_message}
+import examples.lsp.lsp_types.{
+  METHOD_INITIALIZE, METHOD_INITIALIZED, METHOD_SHUTDOWN, METHOD_EXIT,
+  METHOD_TEXT_DOCUMENT_DID_OPEN, METHOD_TEXT_DOCUMENT_DID_CHANGE, METHOD_TEXT_DOCUMENT_DID_CLOSE,
+  METHOD_TEXT_DOCUMENT_PUBLISH_DIAGNOSTICS, METHOD_CANCEL_REQUEST,
+  InitializeParams, InitializeResult, InitializedParams, DidOpenTextDocumentParams,
+  DidChangeTextDocumentParams, DidCloseTextDocumentParams, PublishDiagnosticsParams, CancelParams,
+  CancelParamsId, TextDocumentContentChangeEvent, ServerCapabilitiesSemanticTokensProvider,
+  ServerCapabilitiesTextDocumentSync, TextDocumentSyncKind, DiagnosticCode, DiagnosticSeverity,
+  Position, PositionEncodingKind, TraceValues
+}
+
+// Round trips of the generated LSP types (`lsp_types.ignite`, story:lsp-types): for each root
+// method, a JSON-RPC message in the base protocol's form (LSP 3.17, "Base Protocol",
+// `{"jsonrpc": "2.0", "id": 1, "method": ...}`) whose params or result decode into the
+// generated type and encode back to an equal `Json`. The 3.17 specification has no complete
+// JSON message for these methods, so each example is assembled from what it does quote: the
+// document `{"uri": "file:///folder/file.ts"}` and the progress token
+// `"1d546990-40a3-4b77-b134-46622995f6ae"` ("Work Done Progress"), the server capability
+// `{"referencesProvider": {"workDoneProgress": true}}` (same section), the range
+// `{start: {line: 5, character: 23}, end: {line: 6, character: 0}}` ("Range"), the cell text
+// `function add(a, b) {...}` ("Notebook Document"), and the values the specification
+// defines (`"utf-16"`, `"off"`, `TextDocumentSyncKind.Incremental` = 2,
+// `DiagnosticSeverity.Error` = 1). JSON objects are unordered (RFC 8259 section 4), so two
+// values are compared after `canonical` sorts every object's members by name.
+
+// `value` with the members of every object sorted by name.
+test fn canonical(value: Json) -> Json = match value {
+  Array(items) => Array(items.map(canonical))
+  Object(members) => {
+    var sorted: Map<Text, Json> = Map.empty()
+    for member in members {
+      sorted.put(member.0, canonical(member.1))
+    }
+    var out: List<(Text, Json)> = []
+    for (name, item) in sorted {
+      out.push((name, item))
+    }
+    Object(out)
+  }
+  other => other
+}
+
+// The method and params of a request or notification.
+test fn call_of(text: Text) -> Option<(Text, Option<Json>)> = match decode(text) {
+  Ok(Call(request)) => Some((request.method, request.params))
+  Ok(Notify(notification)) => Some((notification.method, notification.params))
+  _ => Option.None
+}
+
+// The result of a successful response.
+test fn result_of(text: Text) -> Option<Json> = match decode(text) {
+  Ok(Reply(response)) => match response.outcome {
+    Ok(result) => Some(result)
+    Err(_) => Option.None
+  }
+  _ => Option.None
+}
+
+test const INITIALIZE: Text = r#"{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "initialize",
+  "params": {
+    "processId": 1234,
+    "clientInfo": { "name": "client", "version": "1.0" },
+    "locale": "en",
+    "rootPath": null,
+    "rootUri": "file:///folder",
+    "capabilities": {
+      "textDocument": {
+        "synchronization": { "dynamicRegistration": true, "didSave": true },
+        "publishDiagnostics": { "relatedInformation": true, "tagSupport": { "valueSet": [1, 2] } }
+      },
+      "general": { "positionEncodings": ["utf-16"] }
+    },
+    "initializationOptions": { "anything": [1, 2.5, "x", null] },
+    "trace": "off",
+    "workspaceFolders": null,
+    "workDoneToken": "1d546990-40a3-4b77-b134-46622995f6ae"
+  }
+}"#
+
+test "initialize params decode and re-encode equal" {
+  let (method, params) = call_of(INITIALIZE)?
+  assert method == METHOD_INITIALIZE
+  let json = params?
+  let decoded = InitializeParams.from_json(json)?
+  assert decoded.process_id == Some(1234)
+  assert decoded.root_path == Some(Option.None)
+  assert decoded.root_uri == Some("file:///folder")
+  assert decoded.workspace_folders == Some(Option.None)
+  assert decoded.trace == Some(TraceValues.Off)
+  assert decoded.capabilities.general?.position_encodings == Some([PositionEncodingKind.UTF16])
+  assert canonical(InitializeParams.to_json(decoded)) == canonical(json)
+}
+
+test const INITIALIZE_RESULT: Text = r#"{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "capabilities": {
+      "positionEncoding": "utf-16",
+      "textDocumentSync": { "openClose": true, "change": 2 },
+      "referencesProvider": { "workDoneProgress": true },
+      "hoverProvider": true,
+      "semanticTokensProvider": {
+        "legend": { "tokenTypes": ["property", "type", "class"], "tokenModifiers": [] },
+        "full": { "delta": true },
+        "documentSelector": null
+      }
+    },
+    "serverInfo": { "name": "ignite", "version": "0.4.0" }
+  }
+}"#
+
+test "initialize result decodes and re-encodes equal" {
+  let json = result_of(INITIALIZE_RESULT)?
+  let decoded = InitializeResult.from_json(json)?
+  match decoded.capabilities.text_document_sync? {
+    ServerCapabilitiesTextDocumentSync.TextDocumentSyncOptions(options) => { assert options.change == Some(TextDocumentSyncKind.Incremental) }
+    other => { assert false, "expected the options arm, got {other.debug()}" }
+  }
+  match decoded.capabilities.semantic_tokens_provider? {
+    ServerCapabilitiesSemanticTokensProvider.SemanticTokensRegistrationOptions(options) => { assert options.document_selector == Option.None }
+    other => { assert false, "a documentSelector selects the registration arm, got {other.debug()}" }
+  }
+  assert canonical(InitializeResult.to_json(decoded)) == canonical(json)
+}
+
+test "a bare sync kind takes the enumeration arm" {
+  let kind = ServerCapabilitiesTextDocumentSync.from_json(parse("1")?)?
+  assert kind == ServerCapabilitiesTextDocumentSync.TextDocumentSyncKind(TextDocumentSyncKind.Full)
+  assert ServerCapabilitiesTextDocumentSync.to_json(kind) == Json.Number(1)
+}
+
+test "initialized params decode and re-encode equal" {
+  let (method, params) = call_of(r#"{"jsonrpc": "2.0", "method": "initialized", "params": {}}"#)?
+  assert method == METHOD_INITIALIZED
+  let json = params?
+  assert canonical(InitializedParams.to_json(InitializedParams.from_json(json)?)) == canonical(json)
+}
+
+test "shutdown has no params and a null result" {
+  let request = r#"{"jsonrpc":"2.0","id":1,"method":"shutdown"}"#
+  let (method, params) = call_of(request)?
+  assert method == METHOD_SHUTDOWN
+  assert params == Option.None
+  assert encode_message(decode(request)?) == request
+  let response = r#"{"jsonrpc":"2.0","id":1,"result":null}"#
+  assert result_of(response)? == Json.Null
+  assert encode_message(decode(response)?) == response
+}
+
+test "exit has no params" {
+  let notification = r#"{"jsonrpc":"2.0","method":"exit"}"#
+  let (method, params) = call_of(notification)?
+  assert method == METHOD_EXIT
+  assert params == Option.None
+  assert encode_message(decode(notification)?) == notification
+}
+
+test const DID_OPEN: Text = r#"{
+  "jsonrpc": "2.0",
+  "method": "textDocument/didOpen",
+  "params": {
+    "textDocument": {
+      "uri": "file:///folder/file.ts",
+      "languageId": "typescript",
+      "version": 1,
+      "text": "function add(a, b) {\n\treturn a + b;\n}\n"
+    }
+  }
+}"#
+
+test "didOpen params decode and re-encode equal" {
+  let (method, params) = call_of(DID_OPEN)?
+  assert method == METHOD_TEXT_DOCUMENT_DID_OPEN
+  let json = params?
+  let decoded = DidOpenTextDocumentParams.from_json(json)?
+  assert decoded.text_document.text == "function add(a, b) {{\n\treturn a + b;\n}}\n"
+  assert canonical(DidOpenTextDocumentParams.to_json(decoded)) == canonical(json)
+}
+
+test const DID_CHANGE: Text = r#"{
+  "jsonrpc": "2.0",
+  "method": "textDocument/didChange",
+  "params": {
+    "textDocument": { "uri": "file:///folder/file.ts", "version": 2 },
+    "contentChanges": [
+      { "range": { "start": { "line": 5, "character": 23 }, "end": { "line": 6, "character": 0 } }, "text": "b" },
+      { "text": "function add(a, b) {}" }
+    ]
+  }
+}"#
+
+test "didChange params decode and re-encode equal" {
+  let (method, params) = call_of(DID_CHANGE)?
+  assert method == METHOD_TEXT_DOCUMENT_DID_CHANGE
+  let json = params?
+  let decoded = DidChangeTextDocumentParams.from_json(json)?
+  match decoded.content_changes[0] {
+    TextDocumentContentChangeEvent.TextDocumentContentChangeEventLiteral1(change) => {
+      assert change.range.start == Position { line = 5, character = 23 }
+      assert change.text == "b"
+    }
+    other => { assert false, "a range selects the incremental arm, got {other.debug()}" }
+  }
+  match decoded.content_changes[1] {
+    TextDocumentContentChangeEvent.TextDocumentContentChangeEventLiteral2(change) => { assert change.text == "function add(a, b) {{}}" }
+    other => { assert false, "text alone selects the full arm, got {other.debug()}" }
+  }
+  assert canonical(DidChangeTextDocumentParams.to_json(decoded)) == canonical(json)
+}
+
+test "didClose params decode and re-encode equal" {
+  let message = r#"{"jsonrpc": "2.0", "method": "textDocument/didClose", "params": {"textDocument": {"uri": "file:///folder/file.ts"}}}"#
+  let (method, params) = call_of(message)?
+  assert method == METHOD_TEXT_DOCUMENT_DID_CLOSE
+  let json = params?
+  let decoded = DidCloseTextDocumentParams.from_json(json)?
+  assert decoded.text_document.uri == "file:///folder/file.ts"
+  assert canonical(DidCloseTextDocumentParams.to_json(decoded)) == canonical(json)
+}
+
+test const PUBLISH_DIAGNOSTICS: Text = r#"{
+  "jsonrpc": "2.0",
+  "method": "textDocument/publishDiagnostics",
+  "params": {
+    "uri": "file:///folder/file.ts",
+    "version": 2,
+    "diagnostics": [
+      {
+        "range": { "start": { "line": 5, "character": 23 }, "end": { "line": 6, "character": 0 } },
+        "severity": 1,
+        "code": "E001",
+        "source": "ignite",
+        "message": "unterminated string",
+        "tags": [1]
+      },
+      {
+        "range": { "start": { "line": 9, "character": 5 }, "end": { "line": 9, "character": 8 } },
+        "code": 42,
+        "message": "unused"
+      }
+    ]
+  }
+}"#
+
+test "publishDiagnostics params decode and re-encode equal" {
+  let (method, params) = call_of(PUBLISH_DIAGNOSTICS)?
+  assert method == METHOD_TEXT_DOCUMENT_PUBLISH_DIAGNOSTICS
+  let json = params?
+  let decoded = PublishDiagnosticsParams.from_json(json)?
+  assert decoded.diagnostics[0].severity == Some(DiagnosticSeverity.Error)
+  assert decoded.diagnostics[0].code == Some(DiagnosticCode.String("E001"))
+  assert decoded.diagnostics[1].code == Some(DiagnosticCode.Integer(42))
+  assert canonical(PublishDiagnosticsParams.to_json(decoded)) == canonical(json)
+}
+
+test "cancelRequest params decode and re-encode equal, number or string id" {
+  for message in [
+    r#"{"jsonrpc": "2.0", "method": "$/cancelRequest", "params": {"id": 1}}"#,
+    r#"{"jsonrpc": "2.0", "method": "$/cancelRequest", "params": {"id": "1d546990-40a3-4b77-b134-46622995f6ae"}}"#
+  ] {
+    let (method, params) = call_of(message)?
+    assert method == METHOD_CANCEL_REQUEST
+    let json = params?
+    assert canonical(CancelParams.to_json(CancelParams.from_json(json)?)) == canonical(json)
+  }
+  let numbered = CancelParams.from_json(parse(r#"{"id": 1}"#)?)?
+  assert numbered.id == CancelParamsId.Integer(1)
+}
+
+test "a value of the wrong shape is refused with its place" {
+  assert Position.from_json(parse(r#"{"line": -1, "character": 0}"#)?) == Err("Position.line: uinteger out of range")
+  assert Position.from_json(parse(r#"{"line": 1}"#)?) == Err("Position.character: missing")
+  assert CancelParams.from_json(parse(r#"{"id": true}"#)?) == Err("CancelParams.id: CancelParamsId: matches none of Integer, String")
+  assert DidCloseTextDocumentParams.from_json(parse("[]")?) == Err("DidCloseTextDocumentParams: expected an object")
+}
