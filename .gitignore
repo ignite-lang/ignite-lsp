@@ -1,0 +1,4 @@
+/target/
+/.ignite/
+**/*.log
+core.*

@@ -1,0 +1,68 @@
+version: '3'
+
+env:
+  CARGO_INCREMENTAL: '0'
+
+vars:
+  IGNITE_TAG: v0.8.0
+  IGNITE_ROOT: '{{.IGNITE_ROOT | default ".ignite"}}'
+  IGNITE:
+    sh: realpath -m '{{.IGNITE_ROOT}}/bin/ignite'
+  OUT: '{{.OUT | default "target/ignite-lsp"}}'
+
+tasks:
+  default:
+    cmds:
+      - task --list
+
+  install-ignite:
+    desc: Install the released ignite {{.IGNITE_TAG}} into IGNITE_ROOT (default .ignite); a no-op when it is installed
+    cmds:
+      - cargo install --git https://github.com/ignite-lang/ignite --tag {{.IGNITE_TAG}} --locked ignite --root '{{.IGNITE_ROOT}}'
+
+  build:
+    desc: Build the server with the installed ignite (LLVM, release); writes OUT/bin/ignite-lsp (default target/ignite-lsp)
+    preconditions:
+      - sh: test -x '{{.IGNITE}}'
+        msg: 'no ignite at {{.IGNITE}}: run task install-ignite'
+    cmds:
+      - '''{{.IGNITE}}'' build src/server.ignite --release --out ''{{.OUT}}'''
+
+  check:
+    desc: Format check and clippy with warnings denied
+    cmds:
+      - cargo fmt --all -- --check
+      - cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    desc: The generator's tests, the end-to-end test over stdio and the inline Ignite tests of src/ on both targets, all with the installed ignite
+    preconditions:
+      - sh: test -x '{{.IGNITE}}'
+        msg: 'no ignite at {{.IGNITE}}: run task install-ignite'
+    env:
+      IGNITE: '{{.IGNITE}}'
+    cmds:
+      - cargo test --workspace --locked
+      - '''{{.IGNITE}}'' test src/server.ignite src/roundtrip.ignite --target=all --out target/ignite-test'
+
+  conformance:
+    desc: Print the conformance matrix of the server (ignite conformance)
+    preconditions:
+      - sh: test -x '{{.IGNITE}}'
+        msg: 'no ignite at {{.IGNITE}}: run task install-ignite'
+    cmds:
+      - '''{{.IGNITE}}'' conformance src/server.ignite --out target/ignite-conformance'
+
+  lsp-types:
+    desc: Regenerate src/lsp_types.ignite from docs/lsp/metaModel.json
+    cmds:
+      - cargo run --locked -q -p ignite-lsp-types -- --meta-model docs/lsp/metaModel.json --root initialize --root initialized --root shutdown --root exit --root textDocument/didOpen --root textDocument/didChange --root textDocument/didClose --root textDocument/publishDiagnostics --root '$/cancelRequest' --root-type ErrorCodes --root-type LSPErrorCodes --out src/lsp_types.ignite
+
+  gate:
+    desc: Install the released ignite, check, test, build and print the conformance matrix
+    cmds:
+      - task: install-ignite
+      - task: check
+      - task: test
+      - task: build
+      - task: conformance
