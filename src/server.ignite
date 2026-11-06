@@ -1,4 +1,4 @@
-package examples.lsp
+package lsp
 
 import std.net.{Pipe, PipeStream}
 import std.io.IoError
@@ -13,7 +13,7 @@ import std.protocol.jsonrpc.{
 }
 import std.text.{bytes_find_from, to_lower}
 import std.rfc.language_server_3_17.{LANGUAGE_SERVER_3_17}
-import examples.lsp.lsp_types.{
+import lsp.lsp_types.{
   METHOD_INITIALIZE, METHOD_INITIALIZED, METHOD_SHUTDOWN, METHOD_EXIT,
   METHOD_TEXT_DOCUMENT_DID_OPEN, METHOD_TEXT_DOCUMENT_DID_CHANGE, METHOD_TEXT_DOCUMENT_DID_CLOSE,
   METHOD_TEXT_DOCUMENT_PUBLISH_DIAGNOSTICS, ErrorCodes, InitializeParams, InitializeResult,

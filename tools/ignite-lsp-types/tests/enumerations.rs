@@ -157,7 +157,7 @@ fn an_unknown_root_type_is_refused_by_name_exit_1() {
 
 #[test]
 fn the_vendored_error_codes_are_generated() {
-    let text = std::fs::read_to_string(repo().join("examples/lsp/lsp_types.ignite")).unwrap();
+    let text = std::fs::read_to_string(repo().join("src/lsp_types.ignite")).unwrap();
     assert!(text.contains("  Json.Number(-32002) => Ok(ErrorCodes.ServerNotInitialized)"));
     assert!(text.contains("  Json.Number(-32601) => Ok(ErrorCodes.MethodNotFound)"));
     assert!(text.contains("enum LSPErrorCodes {"));

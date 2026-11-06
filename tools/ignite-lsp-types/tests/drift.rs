@@ -8,7 +8,7 @@ use std::process::Command;
 
 use ignite_lsp_types::generate_with_types;
 
-const MODULE: &str = "examples/lsp/lsp_types.ignite";
+const MODULE: &str = "src/lsp_types.ignite";
 
 #[test]
 fn the_committed_module_is_the_generators_output() {

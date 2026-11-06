@@ -10,7 +10,7 @@ repository.
 | `metaModel.json` | <https://github.com/microsoft/vscode-languageserver-node/blob/release/protocol/3.17.5/protocol/metaModel.json> | `release/protocol/3.17.5`, the last 3.17 protocol release | `4f782ceac1b4444d335a32561bda0ded305c401e` | 395,040 | `ba382feb60d4bab4249073c0508b19c67ba2b32c53d70505f452bb49a6f39997` |
 
 It is vendored so that `tools/ignite-lsp-types` can generate the LSP message types of
-`examples/lsp/lsp_types.ignite` offline, and so that the drift test of that crate can
+`src/lsp_types.ignite` offline, and so that the drift test of that crate can
 regenerate the module and compare it in the gate (`task lsp-types` rewrites it). The types are
 generated, never written by hand (`design:ignite-lsp`, "Decision 2026-11-05: generated types").
 The module's header records this file's sha256.

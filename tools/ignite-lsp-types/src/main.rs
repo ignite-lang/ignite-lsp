@@ -30,7 +30,7 @@ struct Args {
     #[arg(long)]
     out: PathBuf,
     /// The module's package.
-    #[arg(long, default_value = "examples.lsp.lsp_types")]
+    #[arg(long, default_value = "lsp.lsp_types")]
     package: String,
 }
 

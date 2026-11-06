@@ -1,12 +1,12 @@
-//! Story lsp-server, acceptance 5: `examples/lsp/server.ignite` built as `ignite-lsp` on each
-//! target and driven over stdio, with this build's `ignite` as its compiler (`--ignite`). A
-//! buffer with a type error after multibyte characters on its line publishes one E040 at the
-//! range of the offending text, in UTF-16 code units by default and in bytes once UTF-8 is
-//! negotiated; the fixed buffer publishes an empty list; `shutdown` then `exit` ends with
-//! status 0. An output past a pipe buffer (2,000 diagnostics) is read while the server runs;
-//! a body over the 16 MiB limit is skipped with an error and a broken header ends the server
-//! with one stderr line. The inline tests of `server.ignite` cover the rest of the story over
-//! a pipe.
+//! `src/server.ignite` built as `ignite-lsp` on each target by an installed `ignite` (the
+//! environment variable `IGNITE`, set by `task test`) and driven over stdio, with that same
+//! `ignite` as its compiler (`--ignite`). A buffer with a type error after multibyte characters
+//! on its line publishes one E040 at the range of the offending text, in UTF-16 code units by
+//! default and in bytes once UTF-8 is negotiated; the fixed buffer publishes an empty list;
+//! `shutdown` then `exit` ends with status 0. An output past a pipe buffer (2,000 diagnostics)
+//! is read while the server runs; a body over the 16 MiB limit is skipped with an error and a
+//! broken header ends the server with one stderr line. The inline tests of `server.ignite`
+//! cover the rest over a pipe.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -14,35 +14,57 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use ignite::Target;
-
-use crate::common;
-
 const TIMEOUT: Duration = Duration::from_secs(60);
 
+#[derive(Clone, Copy, Debug)]
+enum Target {
+    Rust,
+    Llvm,
+}
+
+/// The `ignite` binary that builds the server and that the server runs: `IGNITE`, absolute.
+fn ignite() -> &'static Path {
+    static IGNITE: OnceLock<PathBuf> = OnceLock::new();
+    IGNITE.get_or_init(|| {
+        let path = std::env::var_os("IGNITE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| panic!("IGNITE must name the ignite binary (`task test` sets it)"));
+        path.canonicalize()
+            .unwrap_or_else(|e| panic!("IGNITE={}: {e}", path.display()))
+    })
+}
+
+/// `ignite build src/server.ignite --target <target>`; the executable it reports as built
+/// whose name is `ignite-lsp`.
 fn build(target: Target) -> PathBuf {
-    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/lsp/server.ignite");
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/server.ignite");
     let tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
-    let options = match target {
-        Target::Rust => ignite::BuildOptions {
-            target: Target::Rust,
-            out: Some(tmp.join("lsp")),
-            ..Default::default()
-        },
-        Target::Llvm => ignite::BuildOptions {
-            target: Target::Llvm,
-            out: Some(tmp.join("lsp-llvm")),
-            runtime: Some(common::runtime_archive()),
-            ..Default::default()
-        },
+    let (name, out) = match target {
+        Target::Rust => ("rust", tmp.join("lsp-rust")),
+        Target::Llvm => ("llvm", tmp.join("lsp-llvm")),
     };
-    let output = ignite::build(&source, &options).unwrap_or_else(|e| panic!("{e}"));
-    output
-        .executables
-        .iter()
+    let output = Command::new(ignite())
+        .arg("build")
+        .arg(&source)
+        .arg("--target")
+        .arg(name)
+        .arg("--out")
+        .arg(&out)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "ignite build --target {name}: {}\n{stdout}{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix("built "))
+        .map(PathBuf::from)
         .find(|path| path.file_name().and_then(|s| s.to_str()) == Some("ignite-lsp"))
-        .unwrap_or_else(|| panic!("no ignite-lsp in {:?}", output.executables))
-        .clone()
+        .unwrap_or_else(|| panic!("no ignite-lsp in {stdout:?}"))
 }
 
 fn server(target: Target) -> &'static Path {
@@ -106,7 +128,7 @@ struct Session {
 fn run_session(target: Target, input: Vec<u8>) -> Session {
     let mut child = Command::new(server(target))
         .arg("--ignite")
-        .arg(env!("CARGO_BIN_EXE_ignite"))
+        .arg(ignite())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -309,13 +331,13 @@ macro_rules! both_targets {
         mod rust {
             $(#[test]
             fn $case() {
-                super::$case(ignite::Target::Rust);
+                super::$case(super::Target::Rust);
             })*
         }
         mod llvm {
             $(#[test]
             fn $case() {
-                super::$case(ignite::Target::Llvm);
+                super::$case(super::Target::Llvm);
             })*
         }
     };

@@ -1,4 +1,4 @@
-package examples.lsp.lsp_types
+package lsp.lsp_types
 
 import std.json.{Json, get}
 import std.result.map_err

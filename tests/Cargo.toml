@@ -1,0 +1,11 @@
+[package]
+name = "ignite-lsp-e2e"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Drives the built ignite-lsp over stdio with an installed ignite as its compiler."
+autotests = false
+
+[[test]]
+name = "lsp"
+path = "lsp.rs"
