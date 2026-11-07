@@ -49,16 +49,16 @@ buffer; its releases carry `ignite-VERSION-x86_64-linux.tar.gz` from v0.13.0 on.
 2. The server:
 
    ```sh
-   curl -L -o ~/.local/bin/ignite-lsp https://github.com/ignite-lang/ignite-lsp/releases/download/v0.1.0/ignite-lsp-0.1.0-x86_64-linux
+   curl -L -o ~/.local/bin/ignite-lsp https://github.com/ignite-lang/ignite-lsp/releases/download/v0.2.0/ignite-lsp-0.2.0-x86_64-linux
    chmod +x ~/.local/bin/ignite-lsp
    ```
 
    `ignite-lsp --ignite /path/to/ignite` names a compiler that is not on `PATH`.
 
-3. VS Code: download `ignite-0.1.0.vsix` from the release, then
+3. VS Code: download `ignite-0.2.0.vsix` from the release, then
 
    ```sh
-   code --install-extension ignite-0.1.0.vsix
+   code --install-extension ignite-0.2.0.vsix
    ```
 
    and run "Developer: Reload Window". The extension (`ignite-lang.ignite`) finds `ignite-lsp`

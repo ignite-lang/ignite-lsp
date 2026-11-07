@@ -1,7 +1,8 @@
 # Ignite for VS Code
 
-Syntax highlighting for `.ignite` files and the diagnostics of `ignite check` as you type,
-through [ignite-lsp](https://github.com/ignite-lang/ignite-lsp).
+Syntax highlighting for `.ignite` files, the diagnostics of `ignite check` as you type, the
+type of the name under the pointer, go to definition and the outline, through
+[ignite-lsp](https://github.com/ignite-lang/ignite-lsp).
 
 ## Binaries
 
@@ -21,5 +22,5 @@ x86_64 binaries only. `Ignite: Restart Language Server` restarts the server; the
 ```sh
 npm ci
 npx @vscode/vsce package --skip-license
-code --install-extension ignite-0.1.0.vsix
+code --install-extension ignite-0.2.0.vsix
 ```
