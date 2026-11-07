@@ -1,0 +1,672 @@
+package lsp.typed
+
+import std.json.{Json, parse, get, text, int, as_list, as_text}
+import std.option.{and_then, unwrap_or}
+import std.text.bytes_match_at
+import lsp.lsp_types.SymbolKind
+
+// The index the server answers hover, go-to-definition and the document outline from: built
+// once per buffer version from the typed program `ignite emit --typed-json` prints (format
+// `ignite-typed/0.1`, ignite `docs/slice.md` section 24) and the text it was printed for.
+//
+// The document gives every expression, pattern, declaration and parameter a span and every
+// expression its type, but a name expression only its name: what a name resolves to is not in
+// it. The index resolves a name itself: to the innermost local binding in scope (a parameter,
+// `let`, `for`, pattern binding or closure parameter declared before it), else to a
+// declaration of the document with that name, else to a variant of one of its enums. A field
+// resolves through its receiver's record type, a call or method call through its `callee`.
+// Only declarations of this document are targets: the document names other modules, not their
+// files.
+
+// A byte range of the text, `end` exclusive.
+type Span {
+  start: Int
+  end: Int
+}
+
+// A place hover and go-to-definition answer for: the code the hover shows, and the name span
+// of the declaration the place refers to, when that declaration is in this document.
+type Spot {
+  at: Span
+  hover: Text
+  target: Option<Span>
+}
+
+// One entry of the outline: its whole span and the span of its name.
+type Entry {
+  name: Text
+  detail: Text
+  kind: SymbolKind
+  whole: Span
+  selection: Span
+  children: List<Entry>
+}
+
+type Index {
+  spots: List<Spot>
+  outline: List<Entry>
+}
+
+// A local binding: its name's span, where it is visible, and its hover.
+type Site {
+  at: Span
+  scope: Span
+  hover: Text
+}
+
+// ---- reading the document ---------------------------------------------------------------
+
+fn items(value: Json, name: Text) -> List<Json> = value.get(name).and_then(as_list).unwrap_or([])
+
+fn type_text(value: Json, name: Text) -> Text = match value.get(name) {
+  Some(ty) => ty.text("text").unwrap_or("?")
+  None => "?"
+}
+
+// The span of `value` when it lies in the document's own file (index 0).
+fn span_of(value: Json) -> Option<Span> = match value.get("span") {
+  Some(span) => match (span.int("file"), span.int("start"), span.int("end")) {
+    (Some(0), Some(start), Some(end)) => Some(Span { start, end })
+    _ => None
+  }
+  None => None
+}
+
+fn inside(outer: Span, inner: Span) -> Bool = outer.start <= inner.start && inner.end <= outer.end
+
+fn is_word(b: Byte) -> Bool = match b {
+  b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' => true
+  _ => false
+}
+
+// The first occurrence of the identifier `name` as a whole word in bytes `from` to `to`.
+fn token(bytes: Bytes, name: Text, from: Int, to: Int) -> Option<Span> {
+  let needle = name.to_bytes()
+  if needle.is_empty() {
+    return None
+  }
+  let last = if to > bytes.len() { bytes.len() } else { to }
+  var at = if from < 0 { 0 } else { from }
+  while at + needle.len() <= last {
+    if bytes_match_at(bytes, needle, at) {
+      let end = at + needle.len()
+      let before = at == 0 || !is_word(bytes.at(at - 1))
+      let after = end >= bytes.len() || !is_word(bytes.at(end))
+      if before && after {
+        return Some(Span { start = at, end })
+      }
+    }
+    at = at + 1
+  }
+  None
+}
+
+// Whether bytes `span` of the text are `name`: the document was printed for this text.
+fn names(bytes: Bytes, span: Span, name: Text) -> Bool =
+  span.end <= bytes.len() && span.start <= span.end && bytes.slice(span.start, span.end).to_text() == name
+
+// Whether a word starts at byte `at`: a declaration starts with its keyword.
+fn starts_word(bytes: Bytes, at: Int) -> Bool =
+  at >= 0 && at < bytes.len() && is_word(bytes.at(at)) && (at == 0 || !is_word(bytes.at(at - 1)))
+
+// Whether bytes `span` of the text are one identifier. A name the parser made up (`Bytes` for a
+// byte string literal) spans text that is not; a name over another identifier means the
+// document is of another text.
+fn is_identifier(bytes: Bytes, span: Span) -> Bool {
+  if span.end > bytes.len() || span.start >= span.end {
+    return false
+  }
+  var at = span.start
+  while at < span.end {
+    if !is_word(bytes.at(at)) {
+      return false
+    }
+    at = at + 1
+  }
+  true
+}
+
+// ---- hovers -----------------------------------------------------------------------------
+
+fn param_text(param: Json) -> Text {
+  let name = param.text("name").unwrap_or("_")
+  let ty = type_text(param, "type")
+  "{name}: {ty}"
+}
+
+fn type_params(decl: Json) -> Text {
+  let names = items(decl, "typeParams").map(|t| as_text(t).unwrap_or("?"))
+  if names.is_empty() { "" } else { "<" + names.join(", ") + ">" }
+}
+
+fn fn_signature(decl: Json) -> Text {
+  let name = decl.text("qualifiedName").unwrap_or(decl.text("name").unwrap_or("?"))
+  "fn " + name + type_params(decl) + fn_detail(decl)
+}
+
+// `(params) -> ret`, then ` requires [..]` when written.
+fn fn_detail(decl: Json) -> Text {
+  let params = items(decl, "params").map(param_text).join(", ")
+  let ret = type_text(decl, "ret")
+  let effects = match decl.get("requires") {
+    Some(Json.Array(effects)) => " requires [" + effects.map(|e| as_text(e).unwrap_or("?")).join(", ") + "]"
+    _ => ""
+  }
+  "(" + params + ") -> " + ret + effects
+}
+
+fn variant_text(variant: Json) -> Text {
+  let name = variant.text("name").unwrap_or("?")
+  let payload = items(variant, "payload").map(|t| t.text("text").unwrap_or("?"))
+  if payload.is_empty() { name } else { name + "(" + payload.join(", ") + ")" }
+}
+
+// The hover of a declaration: its signature, a record's fields and an enum's variants.
+fn decl_hover(decl: Json) -> Text {
+  let kind = decl.text("kind").unwrap_or("")
+  let name = decl.text("name").unwrap_or("?")
+  if kind == "fn" || kind == "role" {
+    fn_signature(decl)
+  } else if kind == "record" {
+    let fields = items(decl, "fields").map(|f| "  " + param_text(f))
+    "type " + name + type_params(decl) + " {{\n" + fields.join("\n") + (if fields.is_empty() { "}}" } else { "\n}}" })
+  } else if kind == "enum" {
+    let variants = items(decl, "variants").map(|v| "  " + variant_text(v))
+    "enum " + name + type_params(decl) + " {{\n" + variants.join("\n") + (if variants.is_empty() { "}}" } else { "\n}}" })
+  } else if kind == "const" {
+    "const " + name + ": " + type_text(decl, "type")
+  } else if kind == "alias" {
+    "type " + name + type_params(decl) + " = " + type_text(decl, "type")
+  } else if kind == "test" {
+    "test \"" + name + "\""
+  } else {
+    kind + " " + name
+  }
+}
+
+// ---- the index --------------------------------------------------------------------------
+
+// The span of `name` in `whole`, the first whole-word occurrence; a test's name is its text.
+fn name_in(bytes: Bytes, whole: Span, name: Text) -> Option<Span> = token(bytes, name, whole.start, whole.end)
+
+// The declarations of the document by the name a reference uses: a fn by its qualified name, a
+// type, constant, system or protocol by its name, a field as `Record.field`, a variant as
+// `Enum.Variant` and as `variant Variant`, a role as `Protocol.role`. Each is the spot of the
+// declaration's name. None when a declaration's name is not in the text at its span.
+fn declarations(decls: List<Json>, bytes: Bytes) -> Option<(Map<Text, Spot>, List<Spot>)> {
+  var table: Map<Text, Spot> = Map.empty()
+  var spots: List<Spot> = []
+  for decl in decls {
+    let kind = decl.text("kind").unwrap_or("")
+    let name = decl.text("name").unwrap_or("")
+    let whole = match span_of(decl) {
+      Some(span) => span
+      None => continue
+    }
+    if !starts_word(bytes, whole.start) {
+      return None
+    }
+    let at = match name_in(bytes, whole, name) {
+      Some(span) => span
+      None => {
+        if kind != "test" {
+          return None
+        }
+        Span { start = whole.start, end = whole.start }
+      }
+    }
+    let spot = Spot { at, hover = decl_hover(decl), target = Some(at) }
+    if kind != "test" {
+      spots.push(spot)
+    }
+    if kind == "fn" {
+      table.put(decl.text("qualifiedName").unwrap_or(name), spot)
+    } else if kind != "test" {
+      table.put(name, spot)
+    }
+    for field in items(decl, "fields") {
+      let field_name = field.text("name").unwrap_or("")
+      match span_of(field).and_then(|s| name_in(bytes, s, field_name)) {
+        Some(field_at) => {
+          let field_spot = Spot { at = field_at, hover = name + "." + param_text(field), target = Some(field_at) }
+          spots.push(field_spot)
+          table.put(name + "." + field_name, field_spot)
+        }
+        None => {}
+      }
+    }
+    for variant in items(decl, "variants") {
+      let variant_name = variant.text("name").unwrap_or("")
+      match span_of(variant).and_then(|s| name_in(bytes, s, variant_name)) {
+        Some(variant_at) => {
+          let variant_spot = Spot { at = variant_at, hover = name + "." + variant_text(variant), target = Some(variant_at) }
+          spots.push(variant_spot)
+          table.put(name + "." + variant_name, variant_spot)
+          if !table.contains("variant " + variant_name) {
+            table.put("variant " + variant_name, variant_spot)
+          }
+        }
+        None => {}
+      }
+    }
+    for role in items(decl, "roles") {
+      let role_name = role.text("name").unwrap_or("")
+      match span_of(role).and_then(|s| name_in(bytes, s, role_name)) {
+        Some(role_at) => {
+          let role_spot = Spot { at = role_at, hover = "role " + name + "." + role_name + fn_detail(role), target = Some(role_at) }
+          spots.push(role_spot)
+          table.put(name + "." + role_name, role_spot)
+        }
+        None => {}
+      }
+    }
+  }
+  Some((table, spots))
+}
+
+// The blocks of the document (`{stmts, span}`): the end of the block each statement is in.
+fn block_ends(decls: List<Json>, stmts: List<Json>, exprs: List<Json>) -> Map<Int, Int> {
+  var ends: Map<Int, Int> = Map.empty()
+  var owners: List<Json> = []
+  for decl in decls {
+    owners.push(decl)
+    owners.append(items(decl, "roles"))
+  }
+  owners.append(stmts)
+  owners.append(exprs)
+  for owner in owners {
+    for key in ["body", "then", "block"] {
+      match owner.get(key) {
+        Some(block) => match (block.get("stmts"), span_of(block)) {
+          (Some(Json.Array(indexes)), Some(span)) => {
+            for index in indexes {
+              match as_int_of(index) {
+                Some(i) => ends.put(i, span.end)
+                None => {}
+              }
+            }
+          }
+          _ => {}
+        }
+        None => {}
+      }
+    }
+  }
+  ends
+}
+
+fn as_int_of(value: Json) -> Option<Int> = match value {
+  Json.Number(n) => Some(n)
+  _ => None
+}
+
+fn add_site(sites: Map<Text, List<Site>>, name: Text, site: Site) -> Map<Text, List<Site>> {
+  var out = sites
+  var list = out.get(name).unwrap_or([])
+  list.push(site)
+  out.put(name, list)
+  out
+}
+
+// The local bindings of the document by name, and their spots.
+fn locals(decls: List<Json>, stmts: List<Json>, exprs: List<Json>, patterns: List<Json>, bytes: Bytes) -> (Map<Text, List<Site>>, List<Spot>) {
+  var sites: Map<Text, List<Site>> = Map.empty()
+  var spots: List<Spot> = []
+  let everything = Span { start = 0, end = bytes.len() }
+  var functions: List<Json> = []
+  for decl in decls {
+    functions.push(decl)
+    functions.append(items(decl, "roles"))
+  }
+  for function in functions {
+    let whole = match span_of(function) {
+      Some(span) => span
+      None => continue
+    }
+    for param in items(function, "params") {
+      let name = param.text("name").unwrap_or("")
+      match span_of(param).and_then(|s| token(bytes, name, s.start, s.end)) {
+        Some(at) => {
+          let hover = param_text(param)
+          sites = add_site(sites, name, Site { at, scope = whole, hover })
+          spots.push(Spot { at, hover, target = Some(at) })
+        }
+        None => {}
+      }
+    }
+  }
+  let ends = block_ends(decls, stmts, exprs)
+  var arms: List<Span> = []
+  var holders: List<(Span, Span)> = []
+  var index = 0
+  for stmt in stmts {
+    let kind = stmt.text("kind").unwrap_or("")
+    match span_of(stmt) {
+      Some(whole) => {
+        let block_end = ends.get(index).unwrap_or(whole.end)
+        if kind == "let" || kind == "for" {
+          let name = stmt.text("name").unwrap_or("")
+          match token(bytes, name, whole.start, whole.end) {
+            Some(at) => {
+              let ty = type_text(stmt, "bindingType")
+              let keyword = if kind == "for" { "for " } else if stmt.get("mutable") == Some(Json.Bool(true)) { "var " } else { "let " }
+              let hover = keyword + name + ": " + ty
+              let scope = if kind == "for" { Span { start = at.end, end = whole.end } } else { Span { start = whole.end, end = block_end } }
+              sites = add_site(sites, name, Site { at, scope, hover })
+              spots.push(Spot { at, hover, target = Some(at) })
+            }
+            None => {}
+          }
+        } else if kind == "letPattern" {
+          holders.push((whole, Span { start = whole.end, end = block_end }))
+        } else if kind == "forPattern" {
+          holders.push((whole, whole))
+        }
+      }
+      None => {}
+    }
+    index = index + 1
+  }
+  for expr in exprs {
+    let kind = expr.text("kind").unwrap_or("")
+    if kind == "match" {
+      for arm in items(expr, "arms") {
+        match span_of(arm) {
+          Some(span) => arms.push(span)
+          None => {}
+        }
+      }
+    } else if kind == "closure" {
+      match span_of(expr) {
+        Some(whole) => {
+          for param in items(expr, "params") {
+            let name = param.text("name").unwrap_or("")
+            match span_of(param).and_then(|s| token(bytes, name, s.start, s.end)) {
+              Some(at) => {
+                let hover = name + ": " + type_text(param, "type")
+                sites = add_site(sites, name, Site { at, scope = whole, hover })
+                spots.push(Spot { at, hover, target = Some(at) })
+              }
+              None => {}
+            }
+          }
+        }
+        None => {}
+      }
+    }
+  }
+  for pattern in patterns {
+    let kind = pattern.text("kind").unwrap_or("")
+    if kind != "binding" && kind != "rest" {
+      continue
+    }
+    let name = match pattern.text("name") {
+      Some(name) => name
+      None => continue
+    }
+    match span_of(pattern).and_then(|s| token(bytes, name, s.start, s.end)) {
+      Some(at) => {
+        var scope = everything
+        for arm in arms {
+          if inside(arm, at) && inside(scope, arm) {
+            scope = arm
+          }
+        }
+        if scope == everything {
+          for (holder, visible) in holders {
+            if inside(holder, at) {
+              scope = visible
+            }
+          }
+        }
+        let hover = name + ": " + type_text(pattern, "bindingType")
+        sites = add_site(sites, name, Site { at, scope = Span { start = at.end, end = scope.end }, hover })
+        spots.push(Spot { at, hover, target = Some(at) })
+      }
+      None => {}
+    }
+  }
+  (sites, spots)
+}
+
+// The innermost binding of `name` visible at byte `offset`: of those whose scope holds it,
+// the one declared last.
+fn local_at(sites: Map<Text, List<Site>>, name: Text, offset: Int) -> Option<Site> {
+  var found: Option<Site> = None
+  for site in sites.get(name).unwrap_or([]) {
+    if site.scope.start <= offset && offset < site.scope.end + 1 && site.at.start < offset {
+      match found {
+        Some(best) => if site.at.start > best.at.start {
+          found = Some(site)
+        }
+        None => {
+          found = Some(site)
+        }
+      }
+    }
+  }
+  found
+}
+
+// What a `callee` refers to in this document's declarations, when it is one of them.
+fn callee_key(callee: Json, module: Text) -> Option<Text> {
+  if callee.text("module") != Some(module) {
+    return None
+  }
+  let kind = callee.text("kind").unwrap_or("")
+  if kind == "fn" || kind == "const" {
+    callee.text("name")
+  } else if kind == "variant" {
+    match (callee.text("enum"), callee.text("variant")) {
+      (Some(owner), Some(variant)) => Some(owner + "." + variant)
+      _ => None
+    }
+  } else if kind == "role" {
+    match (callee.text("protocol"), callee.text("role")) {
+      (Some(owner), Some(role)) => Some(owner + "." + role)
+      _ => None
+    }
+  } else {
+    None
+  }
+}
+
+// The spot of a reference at `at` to the declaration `key`, else one showing `fallback`.
+fn reference(table: Map<Text, Spot>, key: Option<Text>, at: Span, fallback: Text) -> Spot = match key.and_then(|k| table.get(k)) {
+  Some(declared) => Spot { at, hover = declared.hover, target = declared.target }
+  None => Spot { at, hover = fallback, target = None }
+}
+
+// The index of `document`, the typed program of `text`; none when the document was not
+// printed for this text (a name is not where its span says).
+fn index_of(document: Json, source: Text) -> Option<Index> {
+  let bytes = source.to_bytes()
+  let module = document.text("module").unwrap_or("main")
+  let decls = items(document, "decls")
+  let stmts = items(document, "stmts")
+  let exprs = items(document, "exprs")
+  let patterns = items(document, "patterns")
+  let (table, declared) = match declarations(decls, bytes) {
+    Some(found) => found
+    None => return None
+  }
+  let (sites, bound) = locals(decls, stmts, exprs, patterns, bytes)
+  var spots = declared
+  spots.append(bound)
+  for expr in exprs {
+    let at = match span_of(expr) {
+      Some(span) => span
+      None => continue
+    }
+    let kind = expr.text("kind").unwrap_or("")
+    let ty = type_text(expr, "type")
+    let name = expr.text("name").unwrap_or("")
+    if kind == "name" {
+      if !names(bytes, at, name) {
+        if is_identifier(bytes, at) {
+          return None
+        }
+        continue
+      }
+      match local_at(sites, name, at.start) {
+        Some(site) => spots.push(Spot { at, hover = site.hover, target = Some(site.at) })
+        None => {
+          let key = if table.contains(name) { Some(name) } else { Some("variant " + name) }
+          spots.push(reference(table, key, at, name + ": " + ty))
+        }
+      }
+    } else if kind == "field" || kind == "method" {
+      let place = expr.int("receiver").unwrap_or(-1)
+      if place < 0 || place >= exprs.len() {
+        continue
+      }
+      let receiver = exprs[place]
+      let from = match span_of(receiver) {
+        Some(span) => span.end
+        None => at.start
+      }
+      let name_at = match token(bytes, name, from, at.end) {
+        Some(span) => span
+        None => continue
+      }
+      if kind == "field" {
+        let record = match receiver.get("type") {
+          Some(t) => if t.text("kind") == Some("Record") && t.text("module") == Some(module) { t.text("name") } else { None }
+          None => None
+        }
+        let shown = match receiver.get("type").and_then(|t| t.text("text")) {
+          Some(owner) => owner + "." + name + ": " + ty
+          None => name + ": " + ty
+        }
+        spots.push(reference(table, record.and_then(|r| Some(r + "." + name)), name_at, shown))
+      } else {
+        let callee = expr.get("callee").unwrap_or(Json.Null)
+        let owner = if callee.text("kind") == Some("fn") { callee.text("module") } else { None }
+        let shown = match owner {
+          Some(path) => "fn " + path + "." + callee.text("name").unwrap_or(name) + "(…) -> " + ty
+          None => name + "(…) -> " + ty
+        }
+        spots.push(reference(table, callee_key(callee, module), name_at, shown))
+      }
+    } else if kind == "record" || kind == "recordUpdate" {
+      match token(bytes, name, at.start, at.end) {
+        Some(name_at) => spots.push(reference(table, Some(name), name_at, ty))
+        None => {}
+      }
+    } else if kind == "int" || kind == "str" || kind == "bool" || kind == "quantity" {
+      spots.push(Spot { at, hover = ty, target = None })
+    }
+  }
+  for pattern in patterns {
+    if pattern.text("kind") != Some("variant") {
+      continue
+    }
+    let path = items(pattern, "path").map(|p| as_text(p).unwrap_or(""))
+    if path.is_empty() {
+      continue
+    }
+    let last = path[path.len() - 1]
+    let key = if path.len() >= 2 { path[path.len() - 2] + "." + last } else { "variant " + last }
+    match span_of(pattern).and_then(|s| token(bytes, last, s.start, s.end)) {
+      Some(name_at) => spots.push(reference(table, Some(key), name_at, last))
+      None => {}
+    }
+  }
+  Some(Index { spots, outline = outline(decls, bytes) })
+}
+
+// The index of `output`, the text `ignite emit --typed-json` printed for `text`.
+fn index_of_output(output: Text, source: Text) -> Option<Index> = match parse(output) {
+  Ok(document) => if document.text("formatVersion") == Some("ignite-typed/0.1") { index_of(document, source) } else { None }
+  Err(_) => None
+}
+
+// The spot at byte `offset`: the smallest that holds it, or that ends at it.
+fn spot_at(index: Index, offset: Int) -> Option<Spot> {
+  var found: Option<Spot> = None
+  for spot in index.spots {
+    if spot.at.start <= offset && offset <= spot.at.end && spot.at.start < spot.at.end {
+      match found {
+        Some(best) => if spot.at.end - spot.at.start < best.at.end - best.at.start || (offset < spot.at.end && best.at.end == offset) {
+          found = Some(spot)
+        }
+        None => {
+          found = Some(spot)
+        }
+      }
+    }
+  }
+  found
+}
+
+// ---- the outline ------------------------------------------------------------------------
+
+fn entry(name: Text, detail: Text, kind: SymbolKind, whole: Span, selection: Span, children: List<Entry>) -> Entry =
+  Entry { name, detail, kind, whole, selection, children }
+
+// The outline entries of `members` (fields, variants, roles, a system's members) of kind
+// `kind`, each with `detail` of it.
+fn members(owner: Json, key: Text, kind: SymbolKind, bytes: Bytes, detail: fn(Json) -> Text) -> List<Entry> {
+  var out: List<Entry> = []
+  for member in items(owner, key) {
+    let name = member.text("name").unwrap_or("")
+    match span_of(member) {
+      Some(whole) => {
+        let selection = name_in(bytes, whole, name).unwrap_or(whole)
+        out.push(entry(name, detail(member), kind, whole, selection, []))
+      }
+      None => {}
+    }
+  }
+  out
+}
+
+fn member_kind(member: Json) -> Text = member.text("kind").unwrap_or("")
+
+fn param_type(member: Json) -> Text = type_text(member, "type")
+
+fn payload_text(member: Json) -> Text {
+  let payload = items(member, "payload").map(|t| t.text("text").unwrap_or("?"))
+  if payload.is_empty() { "" } else { "(" + payload.join(", ") + ")" }
+}
+
+// The outline of the document: one entry per declaration, in source order; a record's fields,
+// an enum's variants, a system's resources, components, contracts and policies and a
+// protocol's roles below their declaration.
+fn outline(decls: List<Json>, bytes: Bytes) -> List<Entry> {
+  var out: List<Entry> = []
+  for decl in decls {
+    let kind = decl.text("kind").unwrap_or("")
+    let name = decl.text("name").unwrap_or("")
+    let whole = match span_of(decl) {
+      Some(span) => span
+      None => continue
+    }
+    let selection = name_in(bytes, whole, name).unwrap_or(whole)
+    if kind == "fn" {
+      let owned = decl.get("owner") != None && decl.get("owner") != Some(Json.Null)
+      out.push(entry(decl.text("qualifiedName").unwrap_or(name), fn_detail(decl), if owned { SymbolKind.Method } else { SymbolKind.Function }, whole, selection, []))
+    } else if kind == "record" {
+      out.push(entry(name, "type", SymbolKind.Struct, whole, selection, members(decl, "fields", SymbolKind.Field, bytes, param_type)))
+    } else if kind == "enum" {
+      out.push(entry(name, "enum", SymbolKind.Enum, whole, selection, members(decl, "variants", SymbolKind.EnumMember, bytes, payload_text)))
+    } else if kind == "const" {
+      out.push(entry(name, type_text(decl, "type"), SymbolKind.Constant, whole, selection, []))
+    } else if kind == "alias" {
+      out.push(entry(name, "= " + type_text(decl, "type"), SymbolKind.Class, whole, selection, []))
+    } else if kind == "test" {
+      out.push(entry(name, "test", SymbolKind.Event, whole, selection, []))
+    } else if kind == "system" {
+      var children = members(decl, "resources", SymbolKind.Property, bytes, member_kind)
+      children.append(members(decl, "components", SymbolKind.Object, bytes, member_kind))
+      children.append(members(decl, "contracts", SymbolKind.Property, bytes, member_kind))
+      children.append(members(decl, "policies", SymbolKind.Property, bytes, member_kind))
+      out.push(entry(name, "system", SymbolKind.Module, whole, selection, children))
+    } else if kind == "protocol" {
+      out.push(entry(name, "protocol", SymbolKind.Interface, whole, selection, members(decl, "roles", SymbolKind.Method, bytes, fn_detail)))
+    } else {
+      out.push(entry(name, kind, SymbolKind.Package, whole, selection, []))
+    }
+  }
+  out
+}

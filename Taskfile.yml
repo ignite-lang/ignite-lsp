@@ -80,7 +80,7 @@ tasks:
   lsp-types:
     desc: Regenerate src/lsp_types.ignite from docs/lsp/metaModel.json
     cmds:
-      - cargo run --locked -q -p ignite-lsp-types -- --meta-model docs/lsp/metaModel.json --root initialize --root initialized --root shutdown --root exit --root textDocument/didOpen --root textDocument/didChange --root textDocument/didClose --root textDocument/publishDiagnostics --root '$/cancelRequest' --root-type ErrorCodes --root-type LSPErrorCodes --out src/lsp_types.ignite
+      - cargo run --locked -q -p ignite-lsp-types -- --meta-model docs/lsp/metaModel.json --root initialize --root initialized --root shutdown --root exit --root textDocument/didOpen --root textDocument/didChange --root textDocument/didClose --root textDocument/publishDiagnostics --root textDocument/didSave --root textDocument/hover --root textDocument/definition --root textDocument/documentSymbol --root '$/cancelRequest' --root-type ErrorCodes --root-type LSPErrorCodes --out src/lsp_types.ignite
 
   gate:
     desc: Install the released ignite, check, test, build and print the conformance matrix

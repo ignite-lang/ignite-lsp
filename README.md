@@ -1,12 +1,26 @@
 # ignite-lsp
 
 A language server for [Ignite](https://github.com/ignite-lang/ignite), written in Ignite. It speaks
-LSP 3.17 over stdin and stdout and publishes the diagnostics of `ignite check` for each open
-buffer, as you type, with positions in UTF-8 or UTF-16.
+LSP 3.17 over stdin and stdout, with positions in UTF-8 or UTF-16:
+
+- diagnostics: those of `ignite check` for each open buffer, as you type; changes that arrive
+  while a check runs are checked once, at their newest version; while a syntax error hides the
+  type errors, the last ones stay visible, marked `(before the syntax error)`;
+- hover: the type of the name, field, call or literal under the cursor, or a declaration's
+  signature;
+- go to definition: locals, parameters, fns, types, fields, variants and constants declared in
+  the same file;
+- document outline: types with their fields, enums with their variants, fns, constants, tests,
+  systems with their members and protocols with their roles.
+
+Hover, definition and outline come from `ignite emit --typed-json`, run once per buffer
+version. An unsaved buffer that imports sibling modules has none until it is saved (`emit` has
+no `--stdin-for`).
 
 | path | what |
 |---|---|
 | `src/server.ignite` | the server |
+| `src/typed.ignite` | the index behind hover, definition and the outline |
 | `src/lsp_types.ignite` | the LSP message types, generated from `docs/lsp/metaModel.json` |
 | `tools/ignite-lsp-types/` | the generator of those types |
 | `tests/` | the end-to-end test over stdio |

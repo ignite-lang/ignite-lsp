@@ -180,7 +180,7 @@ const SHUT_DOWN: &str = r#"{"jsonrpc":"2.0","id":2,"result":null}"#;
 
 fn capabilities(encoding: &str) -> String {
     format!(
-        r#"{{"jsonrpc":"2.0","id":1,"result":{{"capabilities":{{"positionEncoding":"{encoding}","textDocumentSync":{{"openClose":true,"change":1}}}},"serverInfo":{{"name":"ignite-lsp"}}}}}}"#
+        r#"{{"jsonrpc":"2.0","id":1,"result":{{"capabilities":{{"positionEncoding":"{encoding}","textDocumentSync":{{"openClose":true,"change":1,"save":true}},"hoverProvider":true,"definitionProvider":true,"documentSymbolProvider":true}},"serverInfo":{{"name":"ignite-lsp"}}}}}}"#
     )
 }
 
@@ -245,6 +245,7 @@ fn round_trip(
         initialize.to_string(),
         INITIALIZED.to_string(),
         opened(&uri, 1, BROKEN),
+        ping(3),
         changed(&uri, 2, FIXED),
         SHUTDOWN.to_string(),
         EXIT.to_string(),
@@ -256,6 +257,7 @@ fn round_trip(
         [
             capabilities(encoding),
             published(&uri, 1, &mismatch(start, end)),
+            pong(3),
             published(&uri, 2, ""),
             SHUT_DOWN.to_string(),
         ],
@@ -326,6 +328,263 @@ fn a_body_over_the_limit_is_skipped_and_a_broken_header_is_named_on_stderr(targe
     );
 }
 
+/// A request the server does not implement: it makes the server check the buffers that wait
+/// before it answers.
+fn ping(id: i64) -> String {
+    format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"x/ping"}}"#)
+}
+
+fn pong(id: i64) -> String {
+    format!(
+        r#"{{"jsonrpc":"2.0","id":{id},"error":{{"code":-32601,"message":"method not found: x/ping"}}}}"#
+    )
+}
+
+/// `steps` written to the server of `target` one after another, each followed by its pause,
+/// then the end of input.
+fn run_steps(target: Target, compiler: &Path, steps: Vec<(Vec<u8>, Duration)>) -> Session {
+    let mut child = Command::new(server(target))
+        .arg("--ignite")
+        .arg(compiler)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let writer = std::thread::spawn(move || {
+        for (bytes, pause) in steps {
+            if stdin.write_all(&bytes).is_err() {
+                return;
+            }
+            let _ = stdin.flush();
+            std::thread::sleep(pause);
+        }
+    });
+    let stdout = drain(child.stdout.take().unwrap());
+    let stderr = drain(child.stderr.take().unwrap());
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > TIMEOUT {
+            let _ = child.kill();
+            panic!("ignite-lsp did not exit within {TIMEOUT:?}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    writer.join().unwrap();
+    Session {
+        code: status.code(),
+        replies: bodies(&stdout.join().unwrap()),
+        stderr: String::from_utf8_lossy(&stderr.join().unwrap()).into_owned(),
+    }
+}
+
+/// The versions of the publishDiagnostics among `replies`, in order.
+fn published_versions(replies: &[String]) -> Vec<i64> {
+    replies
+        .iter()
+        .filter(|r| r.contains(r#""method":"textDocument/publishDiagnostics""#))
+        .filter_map(|r| {
+            let at = r.find(r#""version":"#)? + r#""version":"#.len();
+            let digits: String = r[at..].chars().take_while(char::is_ascii_digit).collect();
+            digits.parse().ok()
+        })
+        .collect()
+}
+
+/// Nine changes written in one write of under 4,096 bytes (`PIPE_BUF`, so one read takes all
+/// of it): the server checks once, at the newest version.
+fn changes_that_arrive_together_are_checked_once(target: Target) {
+    let uri = document(target, "together", "a.ignite");
+    let mut messages = vec![
+        INITIALIZE_UTF16.to_string(),
+        INITIALIZED.to_string(),
+        opened(&uri, 1, FIXED),
+    ];
+    for version in 2..=10 {
+        messages.push(changed(&uri, version, FIXED));
+    }
+    messages.push(SHUTDOWN.to_string());
+    messages.push(EXIT.to_string());
+    let bytes = input(&messages);
+    assert!(bytes.len() < 4096, "{} bytes", bytes.len());
+    let session = run_session(target, bytes);
+    assert_eq!(session.code, Some(0), "stderr: {}", session.stderr);
+    assert_eq!(
+        session.replies,
+        [
+            capabilities("utf-16"),
+            published(&uri, 10, ""),
+            SHUT_DOWN.to_string()
+        ],
+        "stderr: {}",
+        session.stderr
+    );
+}
+
+/// A check runs once the input is quiet, without a request; changes typed while a check runs
+/// are checked together after it, and the published versions only grow. The compiler is
+/// `ignite` behind a script that waits 300 ms first, far longer than the 2 ms between two
+/// changes.
+fn checks_follow_typing_and_never_go_back(target: Target) {
+    let uri = document(target, "typing", "a.ignite");
+    let slow = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("slow-ignite-{target:?}"));
+    std::fs::write(
+        &slow,
+        format!(
+            "#!/bin/sh\nsleep 0.3\nexec '{}' \"$@\"\n",
+            ignite().display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&slow, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let pause = Duration::from_millis(2);
+    let mut steps = vec![
+        (framed(INITIALIZE_UTF16), pause),
+        (
+            framed(&opened(&uri, 1, BROKEN)),
+            Duration::from_millis(1500),
+        ),
+    ];
+    for version in 2..=8 {
+        let text = if version % 2 == 0 { FIXED } else { BROKEN };
+        steps.push((framed(&changed(&uri, version, text)), pause));
+    }
+    steps.push((Vec::new(), Duration::from_millis(1500)));
+    steps.push((input(&[SHUTDOWN.to_string(), EXIT.to_string()]), pause));
+    let session = run_steps(target, &slow, steps);
+    assert_eq!(session.code, Some(0), "stderr: {}", session.stderr);
+    let versions = published_versions(&session.replies);
+    assert_eq!(versions.first(), Some(&1), "{:?}", session.replies);
+    assert_eq!(versions.last(), Some(&8), "{:?}", session.replies);
+    assert!(
+        versions.windows(2).all(|w| w[0] < w[1]),
+        "versions {versions:?}"
+    );
+    assert!(versions.len() < 8, "every change was checked: {versions:?}");
+    assert_eq!(session.replies.last().map(String::as_str), Some(SHUT_DOWN));
+}
+
+/// A type error, then a syntax error appended at the end of the file: the E002 is drawn over
+/// the last character before the end, and the E040 stays, marked stale; an E003's range is the
+/// unknown name.
+fn a_syntax_error_keeps_the_type_errors_and_no_range_is_empty(target: Target) {
+    let uri = document(target, "syntax", "a.ignite");
+    let typed = "fn main() -> Int = \"x\"\n";
+    let broken = format!("{typed}fn zz() -> Int = nope + \n");
+    let messages = [
+        INITIALIZE_UTF16.to_string(),
+        opened(&uri, 1, typed),
+        ping(3),
+        changed(&uri, 2, &broken),
+        ping(4),
+        changed(&uri, 3, "fn main() -> Int = nope + 1\n"),
+        SHUTDOWN.to_string(),
+        EXIT.to_string(),
+    ];
+    let session = run_session(target, input(&messages));
+    assert_eq!(session.code, Some(0), "stderr: {}", session.stderr);
+    let stale_mismatch = r#"{"range":{"start":{"line":0,"character":19},"end":{"line":0,"character":22}},"severity":2,"code":"E040","source":"ignite","message":"(before the syntax error) type mismatch: expected `Int`, found `Text`"}"#;
+    assert_eq!(
+        session.replies,
+        [
+            capabilities("utf-16"),
+            published(
+                &uri,
+                1,
+                r#"{"range":{"start":{"line":0,"character":19},"end":{"line":0,"character":22}},"severity":1,"code":"E040","source":"ignite","message":"type mismatch: expected `Int`, found `Text`"}"#
+            ),
+            pong(3),
+            published(
+                &uri,
+                2,
+                &format!(
+                    r#"{{"range":{{"start":{{"line":1,"character":22}},"end":{{"line":1,"character":23}}}},"severity":1,"code":"E002","source":"ignite","message":"unexpected end of file, expected expression"}},{stale_mismatch}"#
+                )
+            ),
+            pong(4),
+            published(
+                &uri,
+                3,
+                r#"{"range":{"start":{"line":0,"character":19},"end":{"line":0,"character":23}},"severity":1,"code":"E003","source":"ignite","message":"unknown name `nope`"}"#
+            ),
+            SHUT_DOWN.to_string(),
+        ],
+        "stderr: {}",
+        session.stderr
+    );
+}
+
+fn request(id: i64, method: &str, uri: &str, line: usize, character: usize) -> String {
+    format!(
+        r#"{{"jsonrpc":"2.0","id":{id},"method":"{method}","params":{{"textDocument":{{"uri":{}}},"position":{{"line":{line},"character":{character}}}}}}}"#,
+        json_string(uri)
+    )
+}
+
+const PROGRAM: &str = "package e\n\ntype Pair {\n  left: Int\n  right: Int\n}\n\nfn twice(n: Int) -> Int = n * 2\n\nfn sum(pair: Pair) -> Int {\n  let total = pair.left + pair.right\n  twice(total)\n}\n";
+
+/// Hover, definition and the outline of a saved file, then of an unsaved change that moves
+/// every line down, both from the installed `ignite emit --typed-json`.
+fn hover_definition_and_outline_follow_the_buffer(target: Target) {
+    let uri = document(target, "queries", "e.ignite");
+    std::fs::write(uri.strip_prefix("file://").unwrap(), PROGRAM).unwrap();
+    let moved = format!("// moved\n{PROGRAM}");
+    let messages = [
+        INITIALIZE_UTF16.to_string(),
+        opened(&uri, 1, PROGRAM),
+        request(3, "textDocument/hover", &uri, 11, 3),
+        request(4, "textDocument/definition", &uri, 11, 3),
+        request(5, "textDocument/hover", &uri, 10, 22),
+        request(6, "textDocument/definition", &uri, 10, 22),
+        format!(
+            r#"{{"jsonrpc":"2.0","id":7,"method":"textDocument/documentSymbol","params":{{"textDocument":{{"uri":{}}}}}}}"#,
+            json_string(&uri)
+        ),
+        changed(&uri, 2, &moved),
+        request(8, "textDocument/definition", &uri, 12, 9),
+        SHUTDOWN.to_string(),
+        EXIT.to_string(),
+    ];
+    let session = run_session(target, input(&messages));
+    assert_eq!(session.code, Some(0), "stderr: {}", session.stderr);
+    let versions = published_versions(&session.replies);
+    assert_eq!(versions.last(), Some(&2), "{:?}", session.replies);
+    let replies: Vec<&String> = session
+        .replies
+        .iter()
+        .filter(|r| !r.contains("publishDiagnostics"))
+        .collect();
+    let location = |id: i64, line: usize, start: usize, end: usize| {
+        format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"result":{{"uri":{},"range":{{"start":{{"line":{line},"character":{start}}},"end":{{"line":{line},"character":{end}}}}}}}}}"#,
+            json_string(&uri)
+        )
+    };
+    assert_eq!(replies.len(), 8, "{replies:?}");
+    assert_eq!(
+        replies[1],
+        r#"{"jsonrpc":"2.0","id":3,"result":{"contents":{"kind":"markdown","value":"```ignite\nfn twice(n: Int) -> Int\n```"},"range":{"start":{"line":11,"character":2},"end":{"line":11,"character":7}}}}"#
+    );
+    assert_eq!(*replies[2], location(4, 7, 3, 8));
+    assert_eq!(
+        replies[3],
+        r#"{"jsonrpc":"2.0","id":5,"result":{"contents":{"kind":"markdown","value":"```ignite\nPair.left: Int\n```"},"range":{"start":{"line":10,"character":19},"end":{"line":10,"character":23}}}}"#
+    );
+    assert_eq!(*replies[4], location(6, 3, 2, 6));
+    assert!(
+        replies[5].starts_with(r#"{"jsonrpc":"2.0","id":7,"result":[{"name":"Pair","detail":"type","kind":23,"range":{"start":{"line":2,"character":0},"end":{"line":5,"character":1}},"selectionRange":{"start":{"line":2,"character":5},"end":{"line":2,"character":9}},"children":[{"name":"left""#),
+        "{}",
+        replies[5]
+    );
+    assert!(replies[5].contains(r#"{"name":"sum","detail":"(pair: Pair) -> Int","kind":12,"#));
+    assert_eq!(*replies[6], location(8, 11, 6, 11));
+    assert_eq!(replies[7], SHUT_DOWN);
+}
+
 macro_rules! both_targets {
     ($($case:ident),* $(,)?) => {
         mod rust {
@@ -348,4 +607,8 @@ both_targets!(
     diagnostics_in_utf8_once_negotiated,
     an_output_past_a_pipe_buffer_is_read_while_the_server_runs,
     a_body_over_the_limit_is_skipped_and_a_broken_header_is_named_on_stderr,
+    changes_that_arrive_together_are_checked_once,
+    checks_follow_typing_and_never_go_back,
+    a_syntax_error_keeps_the_type_errors_and_no_range_is_empty,
+    hover_definition_and_outline_follow_the_buffer,
 );

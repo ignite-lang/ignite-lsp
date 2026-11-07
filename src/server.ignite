@@ -3,15 +3,16 @@ package lsp
 import std.net.{Pipe, PipeStream}
 import std.io.IoError
 import std.json.{Json, parse, encode, get, text, int}
-import std.option.unwrap_or
+import std.option.{unwrap_or, and_then}
 import std.result.map_err
 import std.process.{Invocation, ChildExit}
+import std.fs.read_text_file
 import std.protocol.jsonrpc.{
   JsonRpcLimits, Frame, FrameError, Split, split_frame, content_length, frame, read_message,
   Message, Request, Notification, Response, ErrorObject, encode_message, decode_body,
   detected_id, notification_batch, READ_SIZE
 }
-import std.text.{bytes_find_from, to_lower}
+import std.text.{bytes_find_from, to_lower, replace}
 import std.rfc.language_server_3_17.{LANGUAGE_SERVER_3_17}
 import lsp.lsp_types.{
   METHOD_INITIALIZE, METHOD_INITIALIZED, METHOD_SHUTDOWN, METHOD_EXIT,
@@ -20,17 +21,38 @@ import lsp.lsp_types.{
   InitializeResultServerInfo, ServerCapabilities, ServerCapabilitiesTextDocumentSync,
   TextDocumentSyncOptions, TextDocumentSyncKind, PositionEncodingKind, DidOpenTextDocumentParams,
   DidChangeTextDocumentParams, DidCloseTextDocumentParams, TextDocumentContentChangeEvent,
-  PublishDiagnosticsParams, Diagnostic, DiagnosticSeverity, DiagnosticCode, Range, Position
+  PublishDiagnosticsParams, Diagnostic, DiagnosticSeverity, DiagnosticCode, Range, Position,
+  METHOD_TEXT_DOCUMENT_DID_SAVE, METHOD_TEXT_DOCUMENT_HOVER, METHOD_TEXT_DOCUMENT_DEFINITION,
+  METHOD_TEXT_DOCUMENT_DOCUMENT_SYMBOL, DidSaveTextDocumentParams, HoverParams, DefinitionParams,
+  DocumentSymbolParams, Hover, HoverContents, MarkupContent, MarkupKind, Location, Definition,
+  TextDocumentDefinitionResult, TextDocumentDocumentSymbolResult, DocumentSymbol, SymbolKind,
+  ServerCapabilitiesHoverProvider, ServerCapabilitiesDefinitionProvider,
+  ServerCapabilitiesDocumentSymbolProvider, TextDocumentSyncOptionsSave
 }
+import lsp.typed.{Index, Span, Spot, Entry, index_of_output, spot_at, token}
 
 // ignite-lsp: a language server for Ignite (story:lsp-server), LSP 3.17 over standard input
 // and output. Every message type is the generated module `lsp_types.ignite`; JSON-RPC and the
 // base protocol's framing are `std.protocol.jsonrpc`. It implements the lifecycle
 // (`initialize`, `initialized`, `shutdown`, `exit`), full text synchronisation (`didOpen`,
-// `didChange`, `didClose`) and diagnostics: on open and on change the buffer goes to
-// `ignite check --json --stdin-for PATH` on the child's stdin, and each diagnostic comes back
-// as `textDocument/publishDiagnostics`, positions in the negotiated encoding (UTF-8 when the
-// client offers it, else UTF-16).
+// `didChange`, `didClose`, `didSave`), diagnostics, hover, go-to-definition and the document
+// outline. Positions are in the negotiated encoding (UTF-8 when the client offers it, else
+// UTF-16).
+//
+// Diagnostics: an opened or changed buffer goes to `ignite check --json --stdin-for PATH` on
+// the child's stdin, and each diagnostic comes back as `textDocument/publishDiagnostics`. A
+// change does not start a check at once: the buffer waits until the server has no complete
+// message left to read, or is about to answer a request, so changes that arrive together, or
+// while a check runs, are checked once, at their newest version. A diagnostic's empty range is
+// widened to the token there (`widened`). While the buffer has a syntax error (E001, E002) the
+// compiler reports only that, so the type errors of the last check without one are published
+// beside it, marked `(before the syntax error)` and as warnings.
+//
+// Hover, definition and outline (`textDocument/hover`, `definition`, `documentSymbol`) answer
+// from the index of `lsp.typed`, built from `ignite emit --typed-json` once per buffer
+// version: on the file when the buffer is as saved, else on `/dev/stdin` with the buffer as
+// input (`emit` has no `--stdin-for`, so a buffer that imports sibling modules gets no index
+// until it is saved). A document printed for other text than the buffer's gives none.
 //
 // The compiler is the program the setting `--ignite` names: an absolute path, or a bare name
 // looked up in `PATH` (`std.process.Invocation`). Its default is `ignite`, so an editor that
@@ -193,19 +215,44 @@ enum Encoding {
   Utf16
 }
 
-// An open document: its text and the version the client gave it.
+// An open document: its text, the version the client gave it, and whether the text is the
+// file's as last opened or saved.
 type Buffer {
   text: Text
   version: Int
+  saved: Bool = true
 }
 
+// The index of a buffer at `version` (none when the compiler gave none), and the last index of
+// the buffer that there was, which the outline falls back to.
+type Indexed {
+  version: Int
+  index: Option<Index>
+  last: Option<Index>
+}
+
+// The session: open buffers; the URIs whose check waits, in the order they changed; the index
+// of each buffer; the diagnostics of each buffer's last check without a syntax error; the
+// version each buffer's diagnostics were last published for.
 type Session {
   phase: Phase
   encoding: Encoding
   buffers: Map<Text, Buffer>
+  waiting: List<Text>
+  indexes: Map<Text, Indexed>
+  typed: Map<Text, List<Diagnostic>>
+  published: Map<Text, Int>
 }
 
-fn fresh() -> Session = Session { phase = Uninitialized, encoding = Utf16, buffers = Map.empty() }
+fn fresh() -> Session = Session {
+  phase = Uninitialized
+  encoding = Utf16
+  buffers = Map.empty()
+  waiting = []
+  indexes = Map.empty()
+  typed = Map.empty()
+  published = Map.empty()
+}
 
 // What a notification makes the server do besides changing its session.
 enum Act {
@@ -242,15 +289,19 @@ fn encoding_kind(encoding: Encoding) -> PositionEncodingKind = match encoding {
   Utf16 => PositionEncodingKind.UTF16
 }
 
-// The result of `initialize`: full text synchronisation with open and close, positions in
-// `encoding`.
+// The result of `initialize`: full text synchronisation with open, close and save, hover,
+// definition and document symbols, positions in `encoding`.
 fn capabilities(encoding: Encoding) -> InitializeResult = InitializeResult {
   capabilities = ServerCapabilities {
     position_encoding = Some(encoding_kind(encoding))
     text_document_sync = Some(ServerCapabilitiesTextDocumentSync.TextDocumentSyncOptions(TextDocumentSyncOptions {
       open_close = Some(true)
       change = Some(TextDocumentSyncKind.Full)
+      save = Some(TextDocumentSyncOptionsSave.Boolean(true))
     }))
+    hover_provider = Some(ServerCapabilitiesHoverProvider.Boolean(true))
+    definition_provider = Some(ServerCapabilitiesDefinitionProvider.Boolean(true))
+    document_symbol_provider = Some(ServerCapabilitiesDocumentSymbolProvider.Boolean(true))
   }
   server_info = Some(InitializeResultServerInfo { name = "ignite-lsp" })
 }
@@ -320,7 +371,7 @@ fn on_notification(session: Session, notification: Notification) -> (Session, Li
         match session.buffers.get(uri) {
           Some(buffer) => {
             var buffers = session.buffers
-            buffers.put(uri, Buffer { text = replaced(buffer.text, changed.content_changes), version = changed.text_document.version })
+            buffers.put(uri, Buffer { text = replaced(buffer.text, changed.content_changes), version = changed.text_document.version, saved = false })
             (Session { buffers, ..session }, [Publish(uri)])
           }
           None => (session, [])
@@ -331,9 +382,36 @@ fn on_notification(session: Session, notification: Notification) -> (Session, Li
   } else if notification.method == METHOD_TEXT_DOCUMENT_DID_CLOSE {
     match DidCloseTextDocumentParams.from_json(params) {
       Ok(closed) => {
+        let uri = closed.text_document.uri
         var buffers = session.buffers
-        _ = buffers.remove(closed.text_document.uri)
-        (Session { buffers, ..session }, [Clear(closed.text_document.uri)])
+        _ = buffers.remove(uri)
+        var indexes = session.indexes
+        _ = indexes.remove(uri)
+        var typed = session.typed
+        _ = typed.remove(uri)
+        var published = session.published
+        _ = published.remove(uri)
+        (Session { buffers, indexes, typed, published, waiting = without(session.waiting, uri), ..session }, [Clear(uri)])
+      }
+      Err(_) => (session, [])
+    }
+  } else if notification.method == METHOD_TEXT_DOCUMENT_DID_SAVE {
+    match DidSaveTextDocumentParams.from_json(params) {
+      Ok(saved) => {
+        let uri = saved.text_document.uri
+        match session.buffers.get(uri) {
+          Some(buffer) => {
+            var buffers = session.buffers
+            buffers.put(uri, Buffer { saved = true, ..buffer })
+            var indexes = session.indexes
+            match indexes.get(uri) {
+              Some(old) => indexes.put(uri, Indexed { version = -1, index = None, last = newest(old) })
+              None => {}
+            }
+            (Session { buffers, indexes, ..session }, [])
+          }
+          None => (session, [])
+        }
       }
       Err(_) => (session, [])
     }
@@ -356,6 +434,23 @@ fn replaced(text: Text, changes: List<TextDocumentContentChangeEvent>) -> Text {
     }
   }
   out
+}
+
+// `uris` without `uri`.
+fn without(uris: List<Text>, uri: Text) -> List<Text> {
+  var out: List<Text> = []
+  for item in uris {
+    if item != uri {
+      out.push(item)
+    }
+  }
+  out
+}
+
+// The newest index `indexed` holds: its own, else the last one before it.
+fn newest(indexed: Indexed) -> Option<Index> = match indexed.index {
+  Some(index) => Some(index)
+  None => indexed.last
 }
 
 // ---- diagnostics ------------------------------------------------------------------------
@@ -483,6 +578,97 @@ fn units(bytes: Bytes, from: Int, to: Int, encoding: Encoding) -> Int = match en
   }
 }
 
+// The byte offset of `position` in `bytes`, whose lines start at `starts`: the inverse of
+// `position_in`. A line past the last is the end; a character past its line's end is that end;
+// a character inside a UTF-8 sequence is the sequence's start.
+fn offset_in(bytes: Bytes, starts: List<Int>, position: Position, encoding: Encoding) -> Int {
+  if position.line < 0 {
+    return 0
+  }
+  if position.line >= starts.len() {
+    return bytes.len()
+  }
+  let from = starts[position.line]
+  let limit = if position.line + 1 < starts.len() { starts[position.line + 1] } else { bytes.len() }
+  var at = from
+  var count = 0
+  while at < limit && count < position.character {
+    let n = bytes.at(at).to_int()
+    let size = if n < 128 { 1 } else if n >= 240 { 4 } else if n >= 224 { 3 } else if n >= 192 { 2 } else { 1 }
+    let step = match encoding {
+      Utf8 => size
+      Utf16 => if size == 4 { 2 } else { 1 }
+    }
+    if count + step > position.character {
+      return at
+    }
+    count = count + step
+    at = at + size
+  }
+  if at > limit { limit } else { at }
+}
+
+fn is_blank(b: Byte) -> Bool = b == b' ' || b == b'\t' || b == b'\n' || b == b'\r'
+
+fn is_word_byte(b: Byte) -> Bool = match b {
+  b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' => true
+  _ => false
+}
+
+// The bytes `start` to `end` of `bytes` widened when empty, so a client draws them: to the
+// identifier at `start`, else to the one character there; at a line's end or the end of the
+// text (an E002), back to the last character that is not blank before it. A text with no such
+// character keeps the empty range.
+fn widened(bytes: Bytes, start: Int, end: Int) -> (Int, Int) {
+  if end > start {
+    return (start, end)
+  }
+  let size = bytes.len()
+  if start >= 0 && start < size && !is_blank(bytes.at(start)) {
+    var stop = start + 1
+    if is_word_byte(bytes.at(start)) {
+      while stop < size && is_word_byte(bytes.at(stop)) {
+        stop = stop + 1
+      }
+    } else {
+      while stop < size && bytes.at(stop).to_int() >= 128 && bytes.at(stop).to_int() < 192 {
+        stop = stop + 1
+      }
+    }
+    return (start, stop)
+  }
+  var back = if start > size { size - 1 } else { start - 1 }
+  while back >= 0 && is_blank(bytes.at(back)) {
+    back = back - 1
+  }
+  if back < 0 {
+    return (start, end)
+  }
+  var first = back
+  while first > 0 && bytes.at(first).to_int() >= 128 && bytes.at(first).to_int() < 192 {
+    first = first - 1
+  }
+  (first, back + 1)
+}
+
+// `diagnostic` with an empty range widened (`widened`) in `bytes`.
+fn visible(diagnostic: Diagnostic, bytes: Bytes, starts: List<Int>, encoding: Encoding) -> Diagnostic {
+  if diagnostic.range.start != diagnostic.range.end {
+    return diagnostic
+  }
+  let at = offset_in(bytes, starts, diagnostic.range.start, encoding)
+  let (start, end) = widened(bytes, at, at)
+  Diagnostic { range = Range { start = position_in(bytes, starts, start, encoding), end = position_in(bytes, starts, end, encoding) }, ..diagnostic }
+}
+
+// Whether `diagnostic` is a syntax error of the compiler, after which it reports nothing else.
+fn is_syntax(diagnostic: Diagnostic) -> Bool =
+  diagnostic.code == Some(DiagnosticCode.String("E001")) || diagnostic.code == Some(DiagnosticCode.String("E002"))
+
+// `diagnostic` of an earlier check, shown beside a syntax error.
+fn stale(diagnostic: Diagnostic) -> Diagnostic =
+  Diagnostic { severity = Some(DiagnosticSeverity.Warning), message = "(before the syntax error) " + diagnostic.message, ..diagnostic }
+
 // The byte `offset` of the position member `name` of a diagnostic record.
 fn offset_of(item: Json, name: Text) -> Option<Int> = match item.get(name) {
   Some(position) => position.int("offset")
@@ -570,6 +756,174 @@ fn publish(wire: Wire, uri: Text, version: Option<Int>, diagnostics: List<Diagno
   send(wire, Notify(Notification { method = METHOD_TEXT_DOCUMENT_PUBLISH_DIAGNOSTICS, params = Some(PublishDiagnosticsParams.to_json(params)) }))
 }
 
+// The session after `uri`, open as `open`, is checked and its diagnostics published: with a
+// syntax error, the type errors of its last check without one beside it (`stale`); every
+// empty range widened. A version older than the one last published is not published.
+fn diagnose(wire: Wire, checker: Checker, state: Session, uri: Text, open: Buffer) -> Result<Session, IoError> requires [wire.*, stdout.write, checker.*] {
+  if state.published.get(uri).unwrap_or(-1) > open.version {
+    return Ok(state)
+  }
+  let path = path_of(uri).unwrap_or(STAND_IN_PATH)
+  let found = check(checker, path, open.text, state.encoding)
+  var syntax = false
+  var troubled = false
+  for diagnostic in found {
+    if is_syntax(diagnostic) {
+      syntax = true
+    }
+    if diagnostic.source != Some("ignite") {
+      troubled = true
+    }
+  }
+  var typed = state.typed
+  var shown = found
+  if syntax {
+    shown.append(typed.get(uri).unwrap_or([]).map(stale))
+  } else if !troubled {
+    typed.put(uri, found)
+  }
+  let bytes = open.text.to_bytes()
+  let starts = line_starts(bytes)
+  let encoding = state.encoding
+  publish(wire, uri, Some(open.version), shown.map(|d| visible(d, bytes, starts, encoding)))?
+  var published = state.published
+  published.put(uri, open.version)
+  Ok(Session { typed, published, ..state })
+}
+
+// The session after every waiting buffer is checked, in the order they changed.
+fn settle(wire: Wire, checker: Checker, state: Session) -> Result<Session, IoError> requires [wire.*, stdout.write, checker.*] {
+  var next = Session { waiting = [], ..state }
+  for uri in state.waiting {
+    match next.buffers.get(uri) {
+      Some(open) => {
+        next = diagnose(wire, checker, next, uri, open)?
+      }
+      None => {}
+    }
+  }
+  Ok(next)
+}
+
+// ---- hover, definition, outline ---------------------------------------------------------
+
+// Whether `method` is answered from the typed index.
+fn is_query(method: Text) -> Bool =
+  method == METHOD_TEXT_DOCUMENT_HOVER || method == METHOD_TEXT_DOCUMENT_DEFINITION || method == METHOD_TEXT_DOCUMENT_DOCUMENT_SYMBOL
+
+// The index of `buffer`, the document at `uri`, from `ignite emit --typed-json`: on the file
+// when the buffer is as saved, else, or when the file gave none (an editor can open a buffer
+// that differs from its file), on `/dev/stdin` with the buffer as the child's input.
+fn index(checker: Checker, uri: Text, buffer: Buffer) -> Option<Index> requires [checker.*] {
+  match path_of(uri) {
+    Some(file) => if buffer.saved {
+      match emitted(checker, file, Bytes.empty(), buffer.text) {
+        Some(found) => return Some(found)
+        None => {}
+      }
+    }
+    None => {}
+  }
+  emitted(checker, "/dev/stdin", buffer.text.to_bytes(), buffer.text)
+}
+
+// The index of `text` from `ignite emit --typed-json PATH` with `input` on the child's stdin.
+fn emitted(checker: Checker, path: Text, input: Bytes, text: Text) -> Option<Index> requires [checker.*] {
+  var arguments = checker.prefix
+  arguments.append(["emit", "--typed-json", path])
+  let invocation = Invocation { program = checker.program, arguments, input, timeout = 30 seconds, output_limit = 16 MiB }
+  match checker.tools.execute(invocation) {
+    Ok(exit) => if exit.ending == 0 && exit.code == 0 && exit.dropped == 0 { index_of_output(exit.stdout.to_text(), text) } else { None }
+    Err(_) => None
+  }
+}
+
+// The session with the index of `uri`'s current version, built when it has none, and that
+// entry.
+fn indexed(checker: Checker, state: Session, uri: Text, buffer: Buffer) -> (Session, Indexed) requires [checker.*] {
+  let before = state.indexes.get(uri)
+  match before {
+    Some(known) => if known.version == buffer.version {
+      return (state, known)
+    }
+    None => {}
+  }
+  let built = index(checker, uri, buffer)
+  let last = match built {
+    Some(found) => Some(found)
+    None => match before {
+      Some(known) => newest(known)
+      None => None
+    }
+  }
+  let entry = Indexed { version = buffer.version, index = built, last }
+  var indexes = state.indexes
+  indexes.put(uri, entry)
+  (Session { indexes, ..state }, entry)
+}
+
+fn range_of(span: Span, bytes: Bytes, starts: List<Int>, encoding: Encoding) -> Range =
+  Range { start = position_in(bytes, starts, span.start, encoding), end = position_in(bytes, starts, span.end, encoding) }
+
+fn symbol_of(entry: Entry, bytes: Bytes, starts: List<Int>, encoding: Encoding) -> DocumentSymbol = DocumentSymbol {
+  name = if entry.name.is_empty() { "_" } else { entry.name }
+  detail = if entry.detail.is_empty() { None } else { Some(entry.detail) }
+  kind = entry.kind
+  range = range_of(entry.whole, bytes, starts, encoding)
+  selection_range = range_of(entry.selection, bytes, starts, encoding)
+  children = if entry.children.is_empty() { None } else { Some(entry.children.map(|child| symbol_of(child, bytes, starts, encoding))) }
+}
+
+// The answer to a hover, definition or documentSymbol request and the session after it: null
+// for a document that is not open or has no index, or a position with nothing to show; the
+// outline falls back to the buffer's last index while the current version has none.
+fn query(checker: Checker, state: Session, request: Request) -> (Session, Result<Json, ErrorObject>) requires [checker.*] {
+  let params = request.params.unwrap_or(Json.Null)
+  let (uri, position) = if request.method == METHOD_TEXT_DOCUMENT_HOVER {
+    match HoverParams.from_json(params) {
+      Ok(decoded) => (decoded.text_document.uri, Some(decoded.position))
+      Err(reason) => return (state, Err(failure(ErrorCodes.InvalidParams, "{request.method} params: {reason}")))
+    }
+  } else if request.method == METHOD_TEXT_DOCUMENT_DEFINITION {
+    match DefinitionParams.from_json(params) {
+      Ok(decoded) => (decoded.text_document.uri, Some(decoded.position))
+      Err(reason) => return (state, Err(failure(ErrorCodes.InvalidParams, "{request.method} params: {reason}")))
+    }
+  } else {
+    match DocumentSymbolParams.from_json(params) {
+      Ok(decoded) => (decoded.text_document.uri, None)
+      Err(reason) => return (state, Err(failure(ErrorCodes.InvalidParams, "{request.method} params: {reason}")))
+    }
+  }
+  let buffer = match state.buffers.get(uri) {
+    Some(open) => open
+    None => return (state, Ok(Json.Null))
+  }
+  let (next, entry) = indexed(checker, state, uri, buffer)
+  let bytes = buffer.text.to_bytes()
+  let starts = line_starts(bytes)
+  let encoding = next.encoding
+  let answer = match position {
+    None => match newest(entry) {
+      Some(found) => TextDocumentDocumentSymbolResult.to_json(TextDocumentDocumentSymbolResult.DocumentSymbolList(found.outline.map(|e| symbol_of(e, bytes, starts, encoding))))
+      None => Json.Null
+    }
+    Some(at) => match entry.index.and_then(|found| spot_at(found, offset_in(bytes, starts, at, encoding))) {
+      Some(spot) => if request.method == METHOD_TEXT_DOCUMENT_HOVER {
+        let contents = HoverContents.MarkupContent(MarkupContent { kind = MarkupKind.Markdown, value = "```ignite\n" + spot.hover + "\n```" })
+        Hover.to_json(Hover { contents, range = Some(range_of(spot.at, bytes, starts, encoding)) })
+      } else {
+        match spot.target {
+          Some(target) => TextDocumentDefinitionResult.to_json(TextDocumentDefinitionResult.Definition(Definition.Location(Location { uri, range = range_of(target, bytes, starts, encoding) })))
+          None => Json.Null
+        }
+      }
+      None => Json.Null
+    }
+  }
+  (next, Ok(answer))
+}
+
 // ---- the protocol -----------------------------------------------------------------------
 
 // Claims (`docs/slice.md` 19.19): the base protocol and the lifecycle of LSP 3.17 for the
@@ -609,17 +963,24 @@ fn session(wire: Wire, checker: Checker, limits: JsonRpcLimits) -> Result<Int, I
   var state = fresh()
   var buffer = Bytes.empty()
   loop {
+    if buffer.is_empty() && !state.waiting.is_empty() {
+      state = settle(wire, checker, state)?
+    }
     match next_frame(wire, limits, buffer)? {
       Body(body, rest) => {
         buffer = rest
         match decode_body(body) {
           Ok(Call(request)) => {
-            let (next, outcome) = respond(state, request)
+            let (next, outcome) = if state.phase == Running && is_query(request.method) {
+              query(checker, state, request)
+            } else {
+              respond(settle(wire, checker, state)?, request)
+            }
             state = next
             send(wire, Reply(Response { id = Some(request.id), outcome }))?
           }
           Ok(Notify(notification)) => {
-            let (next, exit) = notified(wire, checker, state, notification)?
+            let (next, exit) = notified(wire, state, notification)?
             state = next
             match exit {
               Some(code) => return Ok(code)
@@ -630,7 +991,7 @@ fn session(wire: Wire, checker: Checker, limits: JsonRpcLimits) -> Result<Int, I
           Err(error) => match notification_batch(body) {
             Some(notifications) => {
               for notification in notifications {
-                let (next, exit) = notified(wire, checker, state, notification)?
+                let (next, exit) = notified(wire, state, notification)?
                 state = next
                 match exit {
                   Some(code) => return Ok(code)
@@ -657,19 +1018,18 @@ fn session(wire: Wire, checker: Checker, limits: JsonRpcLimits) -> Result<Int, I
   }
 }
 
-// The session after `notification` and its acts done: each opened or changed document
-// checked and its diagnostics published, a closed one's cleared; the exit status when it is
-// `exit`. A document without a file path is checked under `STAND_IN_PATH`.
-fn notified(wire: Wire, checker: Checker, state: Session, notification: Notification) -> Result<(Session, Option<Int>), IoError> requires [wire.*, stdout.write, checker.*] {
-  let (next, acts) = on_notification(state, notification)
+// The session after `notification` and its acts done: each opened or changed document put
+// last among those whose check waits (`settle` checks them), a closed one.s diagnostics
+// cleared; the exit status when it is `exit`.
+fn notified(wire: Wire, state: Session, notification: Notification) -> Result<(Session, Option<Int>), IoError> requires [wire.*, stdout.write] {
+  let (after, acts) = on_notification(state, notification)
+  var next = after
   for act in acts {
     match act {
-      Publish(uri) => match next.buffers.get(uri) {
-        Some(open) => {
-          let path = path_of(uri).unwrap_or(STAND_IN_PATH)
-          publish(wire, uri, Some(open.version), check(checker, path, open.text, next.encoding))?
-        }
-        None => {}
+      Publish(uri) => {
+        var waiting = without(next.waiting, uri)
+        waiting.push(uri)
+        next = Session { waiting, ..next }
       }
       Clear(uri) => publish(wire, uri, None, [])?
       Exit(code) => return Ok((next, Some(code)))
@@ -744,7 +1104,7 @@ test const INITIALIZED: Text = r#"{"jsonrpc":"2.0","method":"initialized","param
 test const SHUTDOWN: Text = r#"{"jsonrpc":"2.0","id":2,"method":"shutdown"}"#
 test const EXIT: Text = r#"{"jsonrpc":"2.0","method":"exit"}"#
 
-test const CAPABILITIES_UTF16: Text = r#"{"jsonrpc":"2.0","id":1,"result":{"capabilities":{"positionEncoding":"utf-16","textDocumentSync":{"openClose":true,"change":1}},"serverInfo":{"name":"ignite-lsp"}}}"#
+test const CAPABILITIES_UTF16: Text = r#"{"jsonrpc":"2.0","id":1,"result":{"capabilities":{"positionEncoding":"utf-16","textDocumentSync":{"openClose":true,"change":1,"save":true},"hoverProvider":true,"definitionProvider":true,"documentSymbolProvider":true},"serverInfo":{"name":"ignite-lsp"}}}"#
 
 test "initialize, initialized, shutdown and exit get the replies the specification requires, exit 0" verifies [
   LANGUAGE_SERVER_3_17.RBASE_HEADER_1, LANGUAGE_SERVER_3_17.RBASE_REQUEST_1,
@@ -794,7 +1154,7 @@ test "an unknown request gets -32601, a $/ one too, and an unknown notification 
 ] {
   let (code, replies) = exchange([
     INITIALIZE,
-    r#"{"jsonrpc":"2.0","id":7,"method":"textDocument/hover","params":{}}"#,
+    r#"{"jsonrpc":"2.0","id":7,"method":"textDocument/completion","params":{}}"#,
     r#"{"jsonrpc":"2.0","method":"workspace/didChangeConfiguration","params":{"settings":{}}}"#,
     r#"{"jsonrpc":"2.0","method":"$/setTrace","params":{"value":"off"}}"#,
     r#"{"jsonrpc":"2.0","id":"x","method":"$/unknown"}"#,
@@ -804,7 +1164,7 @@ test "an unknown request gets -32601, a $/ one too, and an unknown notification 
   assert code == 0
   assert replies == [
     CAPABILITIES_UTF16,
-    r#"{"jsonrpc":"2.0","id":7,"error":{"code":-32601,"message":"method not found: textDocument/hover"}}"#,
+    r#"{"jsonrpc":"2.0","id":7,"error":{"code":-32601,"message":"method not found: textDocument/completion"}}"#,
     r#"{"jsonrpc":"2.0","id":"x","error":{"code":-32601,"message":"method not found: $/unknown"}}"#,
     r#"{"jsonrpc":"2.0","id":2,"result":null}"#
   ]
@@ -817,7 +1177,7 @@ test "a request after shutdown is InvalidRequest, a second initialize too" verif
     INITIALIZE,
     r#"{"jsonrpc":"2.0","id":3,"method":"initialize","params":{"processId":null,"rootUri":null,"capabilities":{}}}"#,
     SHUTDOWN,
-    r#"{"jsonrpc":"2.0","id":4,"method":"textDocument/hover","params":{}}"#,
+    r#"{"jsonrpc":"2.0","id":4,"method":"textDocument/completion","params":{}}"#,
     EXIT
   ], quiet())?
   assert code == 0
@@ -842,7 +1202,7 @@ test "a cancelled request is still answered" verifies [LANGUAGE_SERVER_3_17.RBAS
 test "utf-8 is negotiated when the client offers it, else utf-16" {
   let offered = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"processId":null,"rootUri":null,"capabilities":{"general":{"positionEncodings":["utf-32","utf-8","utf-16"]}}}}"#
   let (_, utf8) = exchange([offered, EXIT], quiet())?
-  assert utf8 == [r#"{"jsonrpc":"2.0","id":1,"result":{"capabilities":{"positionEncoding":"utf-8","textDocumentSync":{"openClose":true,"change":1}},"serverInfo":{"name":"ignite-lsp"}}}"#]
+  assert utf8 == [r#"{"jsonrpc":"2.0","id":1,"result":{"capabilities":{"positionEncoding":"utf-8","textDocumentSync":{"openClose":true,"change":1,"save":true},"hoverProvider":true,"definitionProvider":true,"documentSymbolProvider":true},"serverInfo":{"name":"ignite-lsp"}}}"#]
   let only16 = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"processId":null,"rootUri":null,"capabilities":{"general":{"positionEncodings":["utf-16"]}}}}"#
   let (_, utf16) = exchange([only16, EXIT], quiet())?
   assert utf16 == [CAPABILITIES_UTF16]
@@ -913,7 +1273,7 @@ test "didOpen, didChange and didClose keep the buffer table" {
   let b = "file:///w/b.ignite"
   let (state, acts) = after([open(a, 1, "one"), open(b, 4, "two"), change(a, 2, "three"), close(b)])?
   assert state.buffers.len() == 1
-  assert state.buffers.get(a) == Some(Buffer { text = "three", version = 2 })
+  assert state.buffers.get(a) == Some(Buffer { text = "three", version = 2, saved = false })
   assert state.buffers.get(b) == None
   assert acts == [Publish(a), Publish(b), Publish(a), Clear(b)]
 }
@@ -925,7 +1285,7 @@ test "a change to a document that is not open changes nothing, and the last whol
   assert none == []
   let two = r#"{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":"file:///w/a.ignite","version":3},"contentChanges":[{"text":"first"},{"text":"second"}]}}"#
   let (state, _) = after([open(a, 1, "zero"), two])?
-  assert state.buffers.get(a) == Some(Buffer { text = "second", version = 3 })
+  assert state.buffers.get(a) == Some(Buffer { text = "second", version = 3, saved = false })
 }
 
 test "a file URI is its percent-decoded path, another scheme has none" {
@@ -944,10 +1304,11 @@ test "a file URI with the localhost authority is its path" {
 }
 
 test "a document that is no file is checked under a stand-in path and gets its diagnostics" {
-  let (_, replies) = exchange([INITIALIZE, open("untitled:Untitled-1", 1, "broken"), EXIT], script(0, 1))?
+  let (_, replies) = exchange([INITIALIZE, open("untitled:Untitled-1", 1, "broken"), SHUTDOWN, EXIT], script(0, 1))?
   assert replies == [
     CAPABILITIES_UTF16,
-    r#"{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{"uri":"untitled:Untitled-1","version":1,"diagnostics":[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"severity":1,"code":"E040","source":"ignite","message":"type mismatch"}]}}"#
+    r#"{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{"uri":"untitled:Untitled-1","version":1,"diagnostics":[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"severity":1,"code":"E040","source":"ignite","message":"type mismatch"}]}}"#,
+    SHUT_DOWN
   ]
 }
 
@@ -1032,7 +1393,9 @@ test "an opened buffer with an error publishes it at its range, a fixed one an e
     INITIALIZE,
     INITIALIZED,
     open(uri, 1, text),
+    ping(5),
     change(uri, 2, "fixed"),
+    ping(6),
     close(uri),
     SHUTDOWN,
     EXIT
@@ -1041,10 +1404,151 @@ test "an opened buffer with an error publishes it at its range, a fixed one an e
   assert replies == [
     CAPABILITIES_UTF16,
     r#"{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{"uri":"file:///w/a.ignite","version":1,"diagnostics":[{"range":{"start":{"line":0,"character":13},"end":{"line":0,"character":16}},"severity":1,"code":"E040","source":"ignite","message":"type mismatch"}]}}"#,
+    pong(5),
     r#"{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{"uri":"file:///w/a.ignite","version":2,"diagnostics":[]}}"#,
+    pong(6),
     r#"{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{"uri":"file:///w/a.ignite","diagnostics":[]}}"#,
     r#"{"jsonrpc":"2.0","id":2,"result":null}"#
   ]
+}
+
+// A request the server does not implement, and its answer: it makes the server run the checks
+// that wait, so a test can see each version's diagnostics.
+test fn ping(id: Int) -> Text = r#"{"jsonrpc":"2.0","id":"#.concat(id.to_text()).concat(r#","method":"x/ping"}"#)
+
+test fn pong(id: Int) -> Text = r#"{"jsonrpc":"2.0","id":"#.concat(id.to_text()).concat(r#","error":{"code":-32601,"message":"method not found: x/ping"}}"#)
+
+test const SHUT_DOWN: Text = r#"{"jsonrpc":"2.0","id":2,"result":null}"#
+
+// The publishDiagnostics of `/w/a.ignite` at `version` with `diagnostics`, JSON items joined.
+test fn published(version: Int, diagnostics: Text) -> Text =
+  r#"{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{"uri":"file:///w/a.ignite","version":"#.concat(version.to_text()).concat(r#","diagnostics":["#).concat(diagnostics).concat(r"]}}")
+
+test "changes that arrive together are checked once, at the newest version" {
+  let uri = "file:///w/a.ignite"
+  let (code, replies) = exchange([
+    INITIALIZE,
+    open(uri, 1, "one"),
+    change(uri, 2, "two"),
+    change(uri, 3, "three"),
+    SHUTDOWN,
+    EXIT
+  ], quiet())?
+  assert code == 0
+  assert replies == [CAPABILITIES_UTF16, published(3, ""), SHUT_DOWN]
+}
+
+// A checker that reports, for a buffer holding `broken`, one E040 over bytes 0 to 1, and for a
+// buffer holding `syntax`, one E002 at the empty range at byte `at`; else nothing.
+test fn syntax_script(at: Int) -> Checker = Checker {
+  tools = Launcher.new()
+  program = "/bin/sh"
+  prefix = [
+    "-c",
+    r#"input=$(cat); case "$input" in *syntax*) printf '{"diagnostics":[{"code":"E002","message":"unexpected end of file","path":"%s","start":{"offset":%s},"end":{"offset":%s}}]}\n' "$4" "$0" "$0";; *broken*) printf '{"diagnostics":[{"code":"E040","message":"type mismatch","path":"%s","start":{"offset":0},"end":{"offset":1}}]}\n' "$4";; *) printf '{"diagnostics":[]}\n';; esac"#,
+    at.to_text()
+  ]
+}
+
+test fn mismatch(prefix: Text, severity: Int) -> Text =
+  r#"{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"severity":"#.concat(severity.to_text()).concat(r#","code":"E040","source":"ignite","message":""#).concat(prefix).concat(r#"type mismatch"}"#)
+
+test fn end_of_file(start: Int, end: Int) -> Text =
+  r#"{"range":{"start":{"line":1,"character":"#.concat(start.to_text()).concat(r#"},"end":{"line":1,"character":"#).concat(end.to_text()).concat(r#"}},"severity":1,"code":"E002","source":"ignite","message":"unexpected end of file"}"#)
+
+test "a syntax error keeps the type errors before it, marked stale, and a fix drops them" {
+  let uri = "file:///w/a.ignite"
+  let (_, replies) = exchange([
+    INITIALIZE,
+    open(uri, 1, "broken"),
+    ping(5),
+    change(uri, 2, "broken\nsyntax + \n"),
+    ping(6),
+    change(uri, 3, "fine"),
+    SHUTDOWN,
+    EXIT
+  ], syntax_script(17))?
+  assert replies == [
+    CAPABILITIES_UTF16,
+    published(1, mismatch("", 1)),
+    pong(5),
+    published(2, end_of_file(7, 8).concat(",").concat(mismatch("(before the syntax error) ", 2))),
+    pong(6),
+    published(3, ""),
+    SHUT_DOWN
+  ]
+}
+
+test "an empty range is widened to the token there, else back to the last character before it" {
+  let text = "fn f() -> Int = nope + \n\n"
+  assert widened(text.to_bytes(), 16, 16) == (16, 20)
+  assert widened(text.to_bytes(), 21, 21) == (21, 22)
+  assert widened(text.to_bytes(), 25, 25) == (21, 22)
+  assert widened(text.to_bytes(), 23, 23) == (21, 22)
+  assert widened("é".to_bytes(), 2, 2) == (0, 2)
+  assert widened(b"", 0, 0) == (0, 0)
+  assert widened(text.to_bytes(), 3, 5) == (3, 5)
+}
+
+// A compiler for the queries: `emit` prints `SAMPLE_DOCUMENT` and appends a line to
+// `<log>/emits` (its path, and `stdin` when it was given the buffer); `check` prints no
+// diagnostic.
+test fn emitter(log: Text) -> Checker = Checker {
+  tools = Launcher.new()
+  program = "/bin/sh"
+  prefix = [
+    "-c",
+    r#"if [ "$2" = emit ]; then echo "$4" >> "$1/emits"; printf '%s\n' "$0"; else printf '{"diagnostics":[]}\n'; fi"#,
+    SAMPLE_DOCUMENT,
+    log
+  ]
+}
+
+test fn asked(id: Int, method: Text, uri: Text, line: Int, character: Int) -> Text =
+  r#"{"jsonrpc":"2.0","id":"#.concat(id.to_text()).concat(r#","method":""#).concat(method).concat(r#"","params":{"textDocument":{"uri":"#).concat(Json.Str(uri).encode()).concat(r#"},"position":{"line":"#).concat(line.to_text()).concat(r#","character":"#).concat(character.to_text()).concat(r"}}}")
+
+test fn saved(uri: Text) -> Text =
+  r#"{"jsonrpc":"2.0","method":"textDocument/didSave","params":{"textDocument":{"uri":"#.concat(Json.Str(uri).encode()).concat(r"}}}")
+
+test "hover, definition and the outline answer from one typed document per buffer version" {
+  let files = Directory.temporary()?
+  let log = files.absolute_path()?
+  let uri = "file:///w/sample.ignite"
+  let (code, replies) = exchange([
+    INITIALIZE,
+    open(uri, 1, SAMPLE_TEXT),
+    asked(3, "textDocument/hover", uri, 16, 17),
+    asked(4, "textDocument/definition", uri, 16, 17),
+    asked(5, "textDocument/hover", uri, 30, 47),
+    asked(6, "textDocument/definition", uri, 33, 13),
+    asked(7, "textDocument/hover", uri, 11, 0),
+    r#"{"jsonrpc":"2.0","id":8,"method":"textDocument/documentSymbol","params":{"textDocument":{"uri":"file:///w/sample.ignite"}}}"#,
+    change(uri, 2, SAMPLE_TEXT),
+    asked(9, "textDocument/hover", uri, 16, 17),
+    saved(uri),
+    asked(10, "textDocument/hover", uri, 16, 17),
+    asked(11, "textDocument/hover", "file:///w/other.ignite", 0, 0),
+    SHUTDOWN,
+    EXIT
+  ], emitter(log))?
+  assert code == 0
+  let hover_wider = r#"{"jsonrpc":"2.0","id":3,"result":{"contents":{"kind":"markdown","value":"```ignite\nlet wider: Int\n```"},"range":{"start":{"line":16,"character":16},"end":{"line":16,"character":21}}}}"#
+  assert replies[1] == hover_wider
+  assert replies[2] == r#"{"jsonrpc":"2.0","id":4,"result":{"uri":"file:///w/sample.ignite","range":{"start":{"line":15,"character":6},"end":{"line":15,"character":11}}}}"#
+  assert replies[3] == r#"{"jsonrpc":"2.0","id":5,"result":{"contents":{"kind":"markdown","value":"```ignite\nfn std.text.split(…) -> List<Text>\n```"},"range":{"start":{"line":30,"character":45},"end":{"line":30,"character":50}}}}"#
+  assert replies[4] == r#"{"jsonrpc":"2.0","id":6,"result":{"uri":"file:///w/sample.ignite","range":{"start":{"line":14,"character":3},"end":{"line":14,"character":7}}}}"#
+  assert replies[5] == r#"{"jsonrpc":"2.0","id":7,"result":null}"#
+  assert replies[6].starts_with(r#"{"jsonrpc":"2.0","id":8,"result":[{"name":"Box","detail":"type","kind":23,"range":{"start":{"line":2,"character":0},"end":{"line":5,"character":1}},"selectionRange":{"start":{"line":2,"character":5},"end":{"line":2,"character":8}},"children":[{"name":"width","detail":"Int","kind":8,"#)
+  assert replies[7] == hover_wider.replace(r#""id":3"#, r#""id":9"#)
+  assert replies[8] == hover_wider.replace(r#""id":3"#, r#""id":10"#)
+  assert replies[9] == r#"{"jsonrpc":"2.0","id":11,"result":null}"#
+  assert files.read_text_file("emits")? == "/w/sample.ignite\n/dev/stdin\n/w/sample.ignite\n"
+}
+
+test "a query with params that do not decode is InvalidParams" {
+  let (_, replies) = exchange([INITIALIZE, r#"{"jsonrpc":"2.0","id":3,"method":"textDocument/hover","params":{}}"#, EXIT], quiet())?
+  assert replies.len() == 2
+  assert replies[1].starts_with(r#"{"jsonrpc":"2.0","id":3,"error":{"code":-32602,"message":"textDocument/hover params: "#)
 }
 
 test "a compiler that cannot run is one diagnostic saying why" {
@@ -1115,4 +1619,168 @@ test "a diagnostic of another file is placed at the start with its path" {
   assert found.len() == 1
   assert found[0].range == Range { start = Position { line = 0, character = 0 }, end = Position { line = 0, character = 0 } }
   assert found[0].message == "/w/b.ignite: unknown module"
+}
+
+// ---- tests of the typed index (src/typed.ignite) ---------------------------------------
+// `SAMPLE_DOCUMENT` is what `ignite emit --typed-json` (v0.13.0) printed for `SAMPLE_TEXT`.
+test const SAMPLE_TEXT: Text = r#"import std.text.split
+
+type Box {
+  width: Int
+  label: Text
+}
+
+enum Shape {
+  Square(Int)
+  Empty
+}
+
+const LIMIT: Int = 10
+
+fn grow(box: Box, by: Int) -> Box {
+  let wider = box.width + by
+  Box { width = wider, label = box.label }
+}
+
+fn size(shape: Shape) -> Int = match shape {
+  Square(side) => side * LIMIT
+  Empty => 0
+}
+
+fn twice(box: Box) -> Int {
+  let x = box.width
+  let x = x + x
+  x
+}
+
+fn words(box: Box) -> List<Text> = box.label.split(" ")
+
+test "grow adds" {
+  let box = grow(Box { width = 1, label = "a b" }, 2)
+  assert box.twice() == 6
+  assert size(Square(box.width)) == 30
+}
+"#
+
+test const SAMPLE_DOCUMENT: Text = r#"{"decls":[{"fields":[{"default":null,"name":"width","satisfies":[],"span":{"column":3,"end":46,"endColumn":13,"endLine":4,"file":0,"line":4,"start":36},"type":{"kind":"Int","text":"Int"}},{"default":null,"name":"label","satisfies":[],"span":{"column":3,"end":60,"endColumn":14,"endLine":5,"file":0,"line":5,"start":49},"type":{"kind":"Text","text":"Text"}}],"kind":"record","name":"Box","satisfies":[],"span":{"column":1,"end":62,"endColumn":2,"endLine":6,"file":0,"line":3,"start":23},"testOnly":false,"typeParams":[]},{"kind":"enum","name":"Shape","span":{"column":1,"end":100,"endColumn":2,"endLine":11,"file":0,"line":8,"start":64},"testOnly":false,"typeParams":[],"variants":[{"name":"Square","payload":[{"kind":"Int","text":"Int"}],"span":{"column":3,"end":90,"endColumn":14,"endLine":9,"file":0,"line":9,"start":79}},{"name":"Empty","payload":[],"span":{"column":3,"end":98,"endColumn":8,"endLine":10,"file":0,"line":10,"start":93}}]},{"kind":"const","name":"LIMIT","span":{"column":1,"end":123,"endColumn":22,"endLine":13,"file":0,"line":13,"start":102},"testOnly":false,"type":{"kind":"Int","text":"Int"},"value":0},{"body":{"span":{"column":35,"end":234,"endColumn":2,"endLine":18,"file":0,"line":15,"start":159},"stmts":[0,1]},"bounds":[],"effectful":false,"kind":"fn","name":"grow","owner":null,"params":[{"name":"box","span":{"column":9,"end":141,"endColumn":17,"endLine":15,"file":0,"line":15,"start":133},"type":{"args":[],"kind":"Record","module":"main","name":"Box","text":"Box"}},{"name":"by","span":{"column":19,"end":150,"endColumn":26,"endLine":15,"file":0,"line":15,"start":143},"type":{"kind":"Int","text":"Int"}}],"qualifiedName":"grow","requires":null,"ret":{"args":[],"kind":"Record","module":"main","name":"Box","text":"Box"},"satisfies":[],"span":{"column":1,"end":234,"endColumn":2,"endLine":18,"file":0,"line":15,"start":125},"testOnly":false,"typeParams":[]},{"body":{"span":{"column":32,"end":326,"endColumn":2,"endLine":23,"file":0,"line":20,"start":267},"stmts":[2]},"bounds":[],"effectful":false,"kind":"fn","name":"size","owner":null,"params":[{"name":"shape","span":{"column":9,"end":256,"endColumn":21,"endLine":20,"file":0,"line":20,"start":244},"type":{"args":[],"kind":"Enum","module":"main","name":"Shape","text":"Shape"}}],"qualifiedName":"size","requires":null,"ret":{"kind":"Int","text":"Int"},"satisfies":[],"span":{"column":1,"end":326,"endColumn":2,"endLine":23,"file":0,"line":20,"start":236},"testOnly":false,"typeParams":[]},{"body":{"span":{"column":27,"end":397,"endColumn":2,"endLine":29,"file":0,"line":25,"start":354},"stmts":[3,4,5]},"bounds":[],"effectful":false,"kind":"fn","name":"twice","owner":null,"params":[{"name":"box","span":{"column":10,"end":345,"endColumn":18,"endLine":25,"file":0,"line":25,"start":337},"type":{"args":[],"kind":"Record","module":"main","name":"Box","text":"Box"}}],"qualifiedName":"twice","requires":null,"ret":{"kind":"Int","text":"Int"},"satisfies":[],"span":{"column":1,"end":397,"endColumn":2,"endLine":29,"file":0,"line":25,"start":328},"testOnly":false,"typeParams":[]},{"body":{"span":{"column":36,"end":454,"endColumn":56,"endLine":31,"file":0,"line":31,"start":434},"stmts":[6]},"bounds":[],"effectful":false,"kind":"fn","name":"words","owner":null,"params":[{"name":"box","span":{"column":10,"end":416,"endColumn":18,"endLine":31,"file":0,"line":31,"start":408},"type":{"args":[],"kind":"Record","module":"main","name":"Box","text":"Box"}}],"qualifiedName":"words","requires":null,"ret":{"args":[{"kind":"Text","text":"Text"}],"kind":"List","text":"List<Text>"},"satisfies":[],"span":{"column":1,"end":454,"endColumn":56,"endLine":31,"file":0,"line":31,"start":399},"testOnly":false,"typeParams":[]},{"body":{"span":{"column":18,"end":595,"endColumn":2,"endLine":37,"file":0,"line":33,"start":473},"stmts":[7,8,9]},"kind":"test","name":"grow adds","span":{"column":1,"end":595,"endColumn":2,"endLine":37,"file":0,"line":33,"start":456},"verifies":[]}],"exprs":[{"kind":"int","span":{"column":20,"end":123,"endColumn":22,"endLine":13,"file":0,"line":13,"start":121},"type":{"kind":"Int","text":"Int"},"value":10},{"kind":"binary","left":2,"op":"+","right":4,"span":{"column":15,"end":189,"endColumn":29,"endLine":16,"file":0,"line":16,"start":175},"type":{"kind":"Int","text":"Int"}},{"kind":"field","name":"width","receiver":3,"span":{"column":15,"end":184,"endColumn":24,"endLine":16,"file":0,"line":16,"start":175},"type":{"kind":"Int","text":"Int"}},{"kind":"name","name":"box","span":{"column":15,"end":178,"endColumn":18,"endLine":16,"file":0,"line":16,"start":175},"type":{"args":[],"kind":"Record","module":"main","name":"Box","text":"Box"}},{"kind":"name","name":"by","span":{"column":27,"end":189,"endColumn":29,"endLine":16,"file":0,"line":16,"start":187},"type":{"kind":"Int","text":"Int"}},{"fields":[{"name":"width","span":{"column":9,"end":211,"endColumn":22,"endLine":17,"file":0,"line":17,"start":198},"value":6},{"name":"label","span":{"column":24,"end":230,"endColumn":41,"endLine":17,"file":0,"line":17,"start":213},"value":7}],"kind":"record","name":"Box","span":{"column":3,"end":232,"endColumn":43,"endLine":17,"file":0,"line":17,"start":192},"type":{"args":[],"kind":"Record","module":"main","name":"Box","text":"Box"}},{"kind":"name","name":"wider","span":{"column":17,"end":211,"endColumn":22,"endLine":17,"file":0,"line":17,"start":206},"type":{"kind":"Int","text":"Int"}},{"kind":"field","name":"label","receiver":8,"span":{"column":32,"end":230,"endColumn":41,"endLine":17,"file":0,"line":17,"start":221},"type":{"kind":"Text","text":"Text"}},{"kind":"name","name":"box","span":{"column":32,"end":224,"endColumn":35,"endLine":17,"file":0,"line":17,"start":221},"type":{"args":[],"kind":"Record","module":"main","name":"Box","text":"Box"}},{"arms":[{"body":11,"pattern":0,"span":{"column":3,"end":311,"endColumn":31,"endLine":21,"file":0,"line":21,"start":283}},{"body":14,"pattern":2,"span":{"column":3,"end":324,"endColumn":13,"endLine":22,"file":0,"line":22,"start":314}}],"kind":"match","scrutinee":10,"span":{"column":32,"end":326,"endColumn":2,"endLine":23,"file":0,"line":20,"start":267},"type":{"kind":"Int","text":"Int"}},{"kind":"name","name":"shape","span":{"column":38,"end":278,"endColumn":43,"endLine":20,"file":0,"line":20,"start":273},"type":{"args":[],"kind":"Enum","module":"main","name":"Shape","text":"Shape"}},{"kind":"binary","left":12,"op":"*","right":13,"span":{"column":19,"end":311,"endColumn":31,"endLine":21,"file":0,"line":21,"start":299},"type":{"kind":"Int","text":"Int"}},{"kind":"name","name":"side","span":{"column":19,"end":303,"endColumn":23,"endLine":21,"file":0,"line":21,"start":299},"type":{"kind":"Int","text":"Int"}},{"kind":"name","name":"LIMIT","span":{"column":26,"end":311,"endColumn":31,"endLine":21,"file":0,"line":21,"start":306},"type":{"kind":"Int","text":"Int"}},{"kind":"int","span":{"column":12,"end":324,"endColumn":13,"endLine":22,"file":0,"line":22,"start":323},"type":{"kind":"Int","text":"Int"},"value":0},{"kind":"field","name":"width","receiver":16,"span":{"column":11,"end":375,"endColumn":20,"endLine":26,"file":0,"line":26,"start":366},"type":{"kind":"Int","text":"Int"}},{"kind":"name","name":"box","span":{"column":11,"end":369,"endColumn":14,"endLine":26,"file":0,"line":26,"start":366},"type":{"args":[],"kind":"Record","module":"main","name":"Box","text":"Box"}},{"kind":"binary","left":18,"op":"+","right":19,"span":{"column":11,"end":391,"endColumn":16,"endLine":27,"file":0,"line":27,"start":386},"type":{"kind":"Int","text":"Int"}},{"kind":"name","name":"x","span":{"column":11,"end":387,"endColumn":12,"endLine":27,"file":0,"line":27,"start":386},"type":{"kind":"Int","text":"Int"}},{"kind":"name","name":"x","span":{"column":15,"end":391,"endColumn":16,"endLine":27,"file":0,"line":27,"start":390},"type":{"kind":"Int","text":"Int"}},{"kind":"name","name":"x","span":{"column":3,"end":395,"endColumn":4,"endLine":28,"file":0,"line":28,"start":394},"type":{"kind":"Int","text":"Int"}},{"args":[24],"callee":{"kind":"fn","module":"std.text","name":"split"},"kind":"method","name":"split","namedArgs":null,"receiver":22,"span":{"column":36,"end":454,"endColumn":56,"endLine":31,"file":0,"line":31,"start":434},"type":{"args":[{"kind":"Text","text":"Text"}],"kind":"List","text":"List<Text>"},"ufcs":true},{"kind":"field","name":"label","receiver":23,"span":{"column":36,"end":443,"endColumn":45,"endLine":31,"file":0,"line":31,"start":434},"type":{"kind":"Text","text":"Text"}},{"kind":"name","name":"box","span":{"column":36,"end":437,"endColumn":39,"endLine":31,"file":0,"line":31,"start":434},"type":{"args":[],"kind":"Record","module":"main","name":"Box","text":"Box"}},{"kind":"str","span":{"column":52,"end":453,"endColumn":55,"endLine":31,"file":0,"line":31,"start":450},"type":{"kind":"Text","text":"Text"},"value":" "},{"args":[27,30],"callee":{"kind":"fn","module":"main","name":"grow"},"function":26,"kind":"call","namedArgs":null,"span":{"column":13,"end":528,"endColumn":54,"endLine":34,"file":0,"line":34,"start":487},"type":{"args":[],"kind":"Record","module":"main","name":"Box","text":"Box"},"ufcs":false},{"kind":"name","name":"grow","span":{"column":13,"end":491,"endColumn":17,"endLine":34,"file":0,"line":34,"start":487},"type":{"kind":"Fn","params":[{"args":[],"kind":"Record","module":"main","name":"Box","text":"Box"},{"kind":"Int","text":"Int"}],"requires":null,"ret":{"args":[],"kind":"Record","module":"main","name":"Box","text":"Box"},"text":"fn(Box, Int) -> Box"}},{"fields":[{"name":"width","span":{"column":24,"end":507,"endColumn":33,"endLine":34,"file":0,"line":34,"start":498},"value":28},{"name":"label","span":{"column":35,"end":522,"endColumn":48,"endLine":34,"file":0,"line":34,"start":509},"value":29}],"kind":"record","name":"Box","span":{"column":18,"end":524,"endColumn":50,"endLine":34,"file":0,"line":34,"start":492},"type":{"args":[],"kind":"Record","module":"main","name":"Box","text":"Box"}},{"kind":"int","span":{"column":32,"end":507,"endColumn":33,"endLine":34,"file":0,"line":34,"start":506},"type":{"kind":"Int","text":"Int"},"value":1},{"kind":"str","span":{"column":43,"end":522,"endColumn":48,"endLine":34,"file":0,"line":34,"start":517},"type":{"kind":"Text","text":"Text"},"value":"a b"},{"kind":"int","span":{"column":52,"end":527,"endColumn":53,"endLine":34,"file":0,"line":34,"start":526},"type":{"kind":"Int","text":"Int"},"value":2},{"kind":"binary","left":32,"op":"==","right":34,"span":{"column":10,"end":554,"endColumn":26,"endLine":35,"file":0,"line":35,"start":538},"type":{"kind":"Bool","text":"Bool"}},{"args":[],"callee":{"kind":"fn","module":"main","name":"twice"},"kind":"method","name":"twice","namedArgs":null,"receiver":33,"span":{"column":10,"end":549,"endColumn":21,"endLine":35,"file":0,"line":35,"start":538},"type":{"kind":"Int","text":"Int"},"ufcs":true},{"kind":"name","name":"box","span":{"column":10,"end":541,"endColumn":13,"endLine":35,"file":0,"line":35,"start":538},"type":{"args":[],"kind":"Record","module":"main","name":"Box","text":"Box"}},{"kind":"int","span":{"column":25,"end":554,"endColumn":26,"endLine":35,"file":0,"line":35,"start":553},"type":{"kind":"Int","text":"Int"},"value":6},{"kind":"binary","left":36,"op":"==","right":42,"span":{"column":10,"end":593,"endColumn":39,"endLine":36,"file":0,"line":36,"start":564},"type":{"kind":"Bool","text":"Bool"}},{"args":[38],"callee":{"kind":"fn","module":"main","name":"size"},"function":37,"kind":"call","namedArgs":null,"span":{"column":10,"end":587,"endColumn":33,"endLine":36,"file":0,"line":36,"start":564},"type":{"kind":"Int","text":"Int"},"ufcs":false},{"kind":"name","name":"size","span":{"column":10,"end":568,"endColumn":14,"endLine":36,"file":0,"line":36,"start":564},"type":{"kind":"Fn","params":[{"args":[],"kind":"Enum","module":"main","name":"Shape","text":"Shape"}],"requires":null,"ret":{"kind":"Int","text":"Int"},"text":"fn(Shape) -> Int"}},{"args":[40],"callee":{"enum":"Shape","index":0,"kind":"variant","module":"main","variant":"Square"},"function":39,"kind":"call","namedArgs":null,"span":{"column":15,"end":586,"endColumn":32,"endLine":36,"file":0,"line":36,"start":569},"type":{"args":[],"kind":"Enum","module":"main","name":"Shape","text":"Shape"},"ufcs":false},{"kind":"name","name":"Square","span":{"column":15,"end":575,"endColumn":21,"endLine":36,"file":0,"line":36,"start":569},"type":{"kind":"Fn","params":[{"kind":"Int","text":"Int"}],"requires":null,"ret":{"args":[],"kind":"Enum","module":"main","name":"Shape","text":"Shape"},"text":"fn(Int) -> Shape"}},{"kind":"field","name":"width","receiver":41,"span":{"column":22,"end":585,"endColumn":31,"endLine":36,"file":0,"line":36,"start":576},"type":{"kind":"Int","text":"Int"}},{"kind":"name","name":"box","span":{"column":22,"end":579,"endColumn":25,"endLine":36,"file":0,"line":36,"start":576},"type":{"args":[],"kind":"Record","module":"main","name":"Box","text":"Box"}},{"kind":"int","span":{"column":37,"end":593,"endColumn":39,"endLine":36,"file":0,"line":36,"start":591},"type":{"kind":"Int","text":"Int"},"value":30}],"files":["sample.ignite"],"formatVersion":"ignite-typed/0.1","imports":[{"glob":false,"module":"std.text","names":[],"path":"std.text.split","span":{"column":1,"end":21,"endColumn":22,"endLine":1,"file":0,"line":1,"start":0}}],"module":"main","package":null,"patterns":[{"args":[1],"constant":null,"kind":"variant","path":["Square"],"span":{"column":3,"end":295,"endColumn":15,"endLine":21,"file":0,"line":21,"start":283}},{"bindingType":{"kind":"Int","text":"Int"},"kind":"binding","name":"side","span":{"column":10,"end":294,"endColumn":14,"endLine":21,"file":0,"line":21,"start":290}},{"args":[],"constant":null,"kind":"variant","path":["Empty"],"span":{"column":3,"end":319,"endColumn":8,"endLine":22,"file":0,"line":22,"start":314}}],"stmts":[{"bindingType":{"kind":"Int","text":"Int"},"declaredType":null,"kind":"let","mutable":false,"name":"wider","span":{"column":3,"end":189,"endColumn":29,"endLine":16,"file":0,"line":16,"start":163},"value":1},{"expr":5,"kind":"expr","span":{"column":3,"end":232,"endColumn":43,"endLine":17,"file":0,"line":17,"start":192}},{"expr":9,"kind":"expr","span":{"column":32,"end":326,"endColumn":2,"endLine":23,"file":0,"line":20,"start":267}},{"bindingType":{"kind":"Int","text":"Int"},"declaredType":null,"kind":"let","mutable":false,"name":"x","span":{"column":3,"end":375,"endColumn":20,"endLine":26,"file":0,"line":26,"start":358},"value":15},{"bindingType":{"kind":"Int","text":"Int"},"declaredType":null,"kind":"let","mutable":false,"name":"x","span":{"column":3,"end":391,"endColumn":16,"endLine":27,"file":0,"line":27,"start":378},"value":17},{"expr":20,"kind":"expr","span":{"column":3,"end":395,"endColumn":4,"endLine":28,"file":0,"line":28,"start":394}},{"expr":21,"kind":"expr","span":{"column":36,"end":454,"endColumn":56,"endLine":31,"file":0,"line":31,"start":434}},{"bindingType":{"args":[],"kind":"Record","module":"main","name":"Box","text":"Box"},"declaredType":null,"kind":"let","mutable":false,"name":"box","span":{"column":3,"end":528,"endColumn":54,"endLine":34,"file":0,"line":34,"start":477},"value":25},{"cond":31,"kind":"assert","message":null,"span":{"column":3,"end":554,"endColumn":26,"endLine":35,"file":0,"line":35,"start":531}},{"cond":35,"kind":"assert","message":null,"span":{"column":3,"end":593,"endColumn":39,"endLine":36,"file":0,"line":36,"start":557}}]}"#
+
+test fn sample() -> Result<Index, Text> = match index_of_output(SAMPLE_DOCUMENT, SAMPLE_TEXT) {
+  Some(index) => Ok(index)
+  None => Err("the sample's document gave no index")
+}
+
+// The byte offset of the `nth` (from 0) whole-word `word` in the sample, plus `into`.
+test fn at(word: Text, nth: Int, into: Int) -> Int {
+  let bytes = SAMPLE_TEXT.to_bytes()
+  var from = 0
+  var count = 0
+  while count <= nth {
+    match token(bytes, word, from, bytes.len()) {
+      Some(span) => {
+        if count == nth {
+          return span.start + into
+        }
+        count = count + 1
+        from = span.end
+      }
+      None => return -1
+    }
+  }
+  -1
+}
+
+// The span of the `nth` whole-word `word`.
+test fn word(name: Text, nth: Int) -> Span {
+  let start = at(name, nth, 0)
+  Span { start, end = start + name.len() }
+}
+
+test fn hover_at(index: Index, offset: Int) -> Option<Text> = match spot_at(index, offset) {
+  Some(spot) => Some(spot.hover)
+  None => None
+}
+
+test fn target_at(index: Index, offset: Int) -> Option<Span> = match spot_at(index, offset) {
+  Some(spot) => spot.target
+  None => None
+}
+
+test "a local's use shows its type and goes to its let" {
+  let index = sample()?
+  assert hover_at(index, at("wider", 1, 2)) == Some("let wider: Int")
+  assert target_at(index, at("wider", 1, 2)) == Some(word("wider", 0))
+}
+
+test "a parameter's use goes to the parameter of its own fn" {
+  let index = sample()?
+  assert hover_at(index, at("by", 1, 0)) == Some("by: Int")
+  assert target_at(index, at("by", 1, 0)) == Some(word("by", 0))
+  assert target_at(index, at("box", 2, 1)) == Some(word("box", 0))
+  assert target_at(index, at("box", 4, 1)) == Some(word("box", 3))
+  assert target_at(index, at("box", 6, 1)) == Some(word("box", 5))
+  assert hover_at(index, at("box", 8, 1)) == Some("let box: Box")
+  assert target_at(index, at("box", 8, 1)) == Some(word("box", 7))
+}
+
+test "a shadowing let is used after it, the shadowed one in its own value" {
+  let index = sample()?
+  assert target_at(index, at("x", 2, 0)) == Some(word("x", 0))
+  assert target_at(index, at("x", 3, 0)) == Some(word("x", 0))
+  assert target_at(index, at("x", 4, 0)) == Some(word("x", 1))
+}
+
+test "a call of a fn of the document shows its signature and goes to it" {
+  let index = sample()?
+  assert hover_at(index, at("grow", 2, 1)) == Some("fn grow(box: Box, by: Int) -> Box")
+  assert target_at(index, at("grow", 2, 1)) == Some(word("grow", 0))
+  assert hover_at(index, at("twice", 1, 0)) == Some("fn twice(box: Box) -> Int")
+  assert target_at(index, at("twice", 1, 0)) == Some(word("twice", 0))
+}
+
+test "a field goes to the record's field, a record literal to the record" {
+  let index = sample()?
+  assert hover_at(index, at("width", 1, 0)) == Some("Box.width: Int")
+  assert target_at(index, at("width", 1, 0)) == Some(word("width", 0))
+  assert hover_at(index, at("Box", 3, 0)) == Some("type Box {{\n  width: Int\n  label: Text\n}}")
+  assert target_at(index, at("Box", 3, 0)) == Some(word("Box", 0))
+}
+
+test "a std method shows its callee and type and has no target" {
+  let index = sample()?
+  assert hover_at(index, at("split", 1, 2)) == Some("fn std.text.split(…) -> List<Text>")
+  assert target_at(index, at("split", 1, 2)) == None
+}
+
+test "variants, pattern bindings and constants resolve" {
+  let index = sample()?
+  assert target_at(index, at("Square", 1, 0)) == Some(word("Square", 0))
+  assert hover_at(index, at("Square", 2, 0)) == Some("Shape.Square(Int)")
+  assert target_at(index, at("Square", 2, 0)) == Some(word("Square", 0))
+  assert hover_at(index, at("side", 1, 0)) == Some("side: Int")
+  assert target_at(index, at("side", 1, 0)) == Some(word("side", 0))
+  assert hover_at(index, at("LIMIT", 1, 0)) == Some("const LIMIT: Int")
+  assert target_at(index, at("LIMIT", 1, 0)) == Some(word("LIMIT", 0))
+}
+
+test "a literal shows its type and the space between names shows nothing" {
+  let index = sample()?
+  assert hover_at(index, at("30", 0, 0)) == Some("Int")
+  assert spot_at(index, at("LIMIT", 0, 0) - 7) == None
+}
+
+test "the outline lists every declaration in order with its members" {
+  let index = sample()?
+  assert index.outline.map(|e| e.name) == ["Box", "Shape", "LIMIT", "grow", "size", "twice", "words", "grow adds"]
+  assert index.outline.map(|e| e.kind) == [SymbolKind.Struct, SymbolKind.Enum, SymbolKind.Constant, SymbolKind.Function, SymbolKind.Function, SymbolKind.Function, SymbolKind.Function, SymbolKind.Event]
+  assert index.outline[0].children.map(|e| (e.name, e.detail)) == [("width", "Int"), ("label", "Text")]
+  assert index.outline[1].children.map(|e| (e.name, e.detail)) == [("Square", "(Int)"), ("Empty", "")]
+  assert index.outline[3].detail == "(box: Box, by: Int) -> Box"
+  assert index.outline[3].selection == word("grow", 0)
+  assert index.outline[0].children[0].selection == word("width", 0)
+}
+
+test "a document printed for another text gives no index" {
+  assert index_of_output(SAMPLE_DOCUMENT, "// one more line\n".concat(SAMPLE_TEXT)) == None
+  assert index_of_output("{{}}", SAMPLE_TEXT) == None
+  assert index_of_output("not json", SAMPLE_TEXT) == None
 }
