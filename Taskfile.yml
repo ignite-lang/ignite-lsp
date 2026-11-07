@@ -4,7 +4,7 @@ env:
   CARGO_INCREMENTAL: '0'
 
 vars:
-  IGNITE_TAG: v0.8.0
+  IGNITE_TAG: v0.13.0
   IGNITE_ROOT: '{{.IGNITE_ROOT | default ".ignite"}}'
   IGNITE:
     sh: realpath -m '{{.IGNITE_ROOT}}/bin/ignite'
@@ -27,6 +27,30 @@ tasks:
         msg: 'no ignite at {{.IGNITE}}: run task install-ignite'
     cmds:
       - '''{{.IGNITE}}'' build src/server.ignite --release --out ''{{.OUT}}'''
+
+  dist:
+    desc: Build the release assets into target/dist, ignite-lsp-VERSION-x86_64-linux (LLVM, release, static musl) and ignite-VERSION.vsix; VERSION is the extension's
+    preconditions:
+      - sh: test -x '{{.IGNITE}}'
+        msg: 'no ignite at {{.IGNITE}}: run task install-ignite'
+    vars:
+      VERSION:
+        sh: node -p "require('./editors/vscode/package.json').version"
+    cmds:
+      - rm -rf target/dist
+      - '''{{.IGNITE}}'' build src/server.ignite --release --static --out target/dist/build'
+      - cp target/dist/build/bin/ignite-lsp 'target/dist/ignite-lsp-{{.VERSION}}-x86_64-linux'
+      - task: vsix
+        vars:
+          VSIX: '{{.ROOT_DIR}}/target/dist/ignite-{{.VERSION}}.vsix'
+      - ls -l target/dist
+
+  vsix:
+    desc: Package the VS Code extension of editors/vscode as VSIX (default editors/vscode/ignite-VERSION.vsix)
+    dir: editors/vscode
+    cmds:
+      - npm ci --no-audit --no-fund
+      - npx vsce package --skip-license {{if .VSIX}}--out '{{.VSIX}}'{{end}}
 
   check:
     desc: Format check and clippy with warnings denied

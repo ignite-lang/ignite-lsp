@@ -1,0 +1,79 @@
+{
+  "name": "ignite",
+  "displayName": "Ignite",
+  "description": "Ignite language support: syntax highlighting and the diagnostics of ignite check through ignite-lsp",
+  "version": "0.1.0",
+  "publisher": "ignite-lang",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ignite-lang/ignite-lsp"
+  },
+  "engines": {
+    "vscode": "^1.82.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "languages": [
+      {
+        "id": "ignite",
+        "aliases": [
+          "Ignite",
+          "ignite"
+        ],
+        "extensions": [
+          ".ignite"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "ignite",
+        "scopeName": "source.ignite",
+        "path": "./syntaxes/ignite.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Ignite",
+      "properties": {
+        "ignite.lsp.path": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path of `ignite-lsp`. Empty: `ignite-lsp` on `PATH`, else the binary of the latest release of github.com/ignite-lang/ignite-lsp, downloaded once into the extension's storage."
+        },
+        "ignite.path": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path of the `ignite` compiler the server runs for `ignite check`. Empty: `ignite` on `PATH`, else the latest release of github.com/ignite-lang/ignite, downloaded once into the extension's storage."
+        },
+        "ignite.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Trace the messages between VS Code and ignite-lsp in the output channel."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "ignite.restartServer",
+        "title": "Ignite: Restart Language Server"
+      }
+    ]
+  },
+  "dependencies": {
+    "vscode-languageclient": "9.0.1"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "4.1.0"
+  }
+}

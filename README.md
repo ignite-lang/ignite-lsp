@@ -10,29 +10,58 @@ buffer, as you type, with positions in UTF-8 or UTF-16.
 | `src/lsp_types.ignite` | the LSP message types, generated from `docs/lsp/metaModel.json` |
 | `tools/ignite-lsp-types/` | the generator of those types |
 | `tests/` | the end-to-end test over stdio |
+| `editors/vscode/` | the VS Code extension: language `ignite`, TextMate grammar, client of `ignite-lsp` |
 
 ## Install
 
+Each [release](https://github.com/ignite-lang/ignite-lsp/releases) carries two assets:
+`ignite-lsp-VERSION-x86_64-linux`, the server for Linux x86_64 (statically linked, musl), and
+`ignite-VERSION.vsix`, the VS Code extension. The server runs the `ignite` compiler for every
+buffer; its releases carry `ignite-VERSION-x86_64-linux.tar.gz` from v0.13.0 on.
+
+1. The compiler: unpack the archive of an [ignite release](https://github.com/ignite-lang/ignite/releases)
+   into a prefix whose `bin` is on your `PATH`, here `~/.local`:
+
+   ```sh
+   curl -LO https://github.com/ignite-lang/ignite/releases/download/v0.13.0/ignite-0.13.0-x86_64-linux.tar.gz
+   tar -xzf ignite-0.13.0-x86_64-linux.tar.gz
+   cp ignite-0.13.0-x86_64-linux/bin/ignite ~/.local/bin/
+   mkdir -p ~/.local/share/ignite
+   cp -R ignite-0.13.0-x86_64-linux/share/ignite/std ~/.local/share/ignite/
+   ```
+
+   The driver reads its standard library from `../share/ignite/std` beside its `bin`.
+
+2. The server:
+
+   ```sh
+   curl -L -o ~/.local/bin/ignite-lsp https://github.com/ignite-lang/ignite-lsp/releases/download/v0.1.0/ignite-lsp-0.1.0-x86_64-linux
+   chmod +x ~/.local/bin/ignite-lsp
+   ```
+
+   `ignite-lsp --ignite /path/to/ignite` names a compiler that is not on `PATH`.
+
+3. VS Code: download `ignite-0.1.0.vsix` from the release, then
+
+   ```sh
+   code --install-extension ignite-0.1.0.vsix
+   ```
+
+   and run "Developer: Reload Window". The extension (`ignite-lang.ignite`) finds `ignite-lsp`
+   and `ignite` through the settings `ignite.lsp.path` and `ignite.path`, then on `PATH`, and
+   otherwise downloads both from the latest releases, so steps 1 and 2 are optional for it.
+   Its source is `editors/vscode/`.
+
+### From source
+
 Needs Rust (stable), [go-task](https://taskfile.dev) and clang.
 
-1. Install the released Ignite compiler, v0.8.0, into `.ignite/`:
-
-   ```sh
-   task install-ignite
-   ```
-
-   This runs `cargo install --git https://github.com/ignite-lang/ignite --tag v0.8.0 --locked ignite
-   --root .ignite`. To use an `ignite` on your `PATH` instead, install it without `--root`.
-
-2. Build the server:
-
-   ```sh
-   task build
-   ```
-
-   The binary is `target/ignite-lsp/bin/ignite-lsp`. Put it on your `PATH`, together with an
-   `ignite`: the server runs `ignite check` for every buffer (`ignite-lsp --ignite /path/to/ignite`
-   names another compiler).
+1. Install the released Ignite compiler, v0.13.0, into `.ignite/`: `task install-ignite` (runs
+   `cargo install --git https://github.com/ignite-lang/ignite --tag v0.13.0 --locked ignite
+   --root .ignite`; to use an `ignite` on your `PATH` instead, install it without `--root`).
+2. Build the server: `task build`. The binary is `target/ignite-lsp/bin/ignite-lsp`.
+3. Package the extension: `task vsix` writes `editors/vscode/ignite-VERSION.vsix` (needs node
+   and npm).
 
 ## Helix
 
