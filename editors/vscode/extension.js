@@ -151,7 +151,7 @@ async function download(context, tool) {
       const file = path.join(dir, asset.name);
       await getFile(asset.browser_download_url, file);
       if (asset.name.endsWith(".tar.gz")) {
-        await run("tar", ["-xzf", file, "-C", dir, "--strip-components=1"]);
+        await run(which("tar") || "/usr/bin/tar", ["-xzf", file, "-C", dir, "--strip-components=1"]);
         fs.unlinkSync(file);
       } else {
         fs.renameSync(file, binary);
