@@ -20,19 +20,22 @@ documents of that repository; the history before the move to this repository is 
 | `src/roundtrip.ignite` | decodes and re-encodes one message per root method on both targets |
 | `tools/ignite-lsp-types/` | the generator: `ignite-lsp-types --meta-model PATH --root METHOD... [--root-type NAME...] --out PATH [--package NAME]`; a type it cannot map is refused, exit 1; `tests/drift.rs` compares `src/lsp_types.ignite` byte for byte (`IGNITE_BLESS=1` or `task lsp-types` rewrites it) |
 | `tests/` | crate `ignite-lsp-e2e`: `lsp.rs` builds `src/server.ignite` with the installed `ignite` (env `IGNITE`) on both targets and drives `ignite-lsp` over stdio |
+| `editors/vscode/` | the VS Code extension (plain JavaScript, `vscode-languageclient`): language id `ignite` for `*.ignite`, `language-configuration.json`, the TextMate grammar `syntaxes/ignite.tmLanguage.json` (keywords from `tree-sitter-ignite` of ignite-helix and the book's `highlight.js`), settings `ignite.lsp.path` and `ignite.path` (else `PATH`, else the Linux x86_64 asset of the latest GitHub release, downloaded into the extension's global storage); its version is the release version |
 | `docs/lsp/` | `metaModel.json` of LSP 3.17, vendored unmodified with its licence and sha256 in `README.md` |
 
 ## Commands
 
 | task | command |
 |---|---|
-| install the released compiler | `task install-ignite` (`cargo install --git https://github.com/ignite-lang/ignite --tag v0.8.0 --locked ignite --root .ignite`; `IGNITE_ROOT=DIR` installs elsewhere; every other task reads `IGNITE_ROOT/bin/ignite`) |
+| install the released compiler | `task install-ignite` (`cargo install --git https://github.com/ignite-lang/ignite --tag v0.13.0 --locked ignite --root .ignite`; `IGNITE_ROOT=DIR` installs elsewhere; every other task reads `IGNITE_ROOT/bin/ignite`) |
 | build the server | `task build` (`ignite build src/server.ignite --release`; `target/ignite-lsp/bin/ignite-lsp`, `OUT=DIR` for another directory) |
 | all tests | `task test` (`cargo test --workspace` with `IGNITE` set, then `ignite test` of `src/server.ignite` and `src/roundtrip.ignite` on both targets) |
 | format and lint | `task check` |
 | conformance matrix | `task conformance` |
 | regenerate the LSP types | `task lsp-types` |
 | merge gate | `task gate` (install, check, test, build, conformance) |
+| package the extension | `task vsix` (`npm ci`, `vsce package`; `editors/vscode/ignite-VERSION.vsix`, `VSIX=PATH` for another file) |
+| release assets | `task dist` (`target/dist/ignite-lsp-VERSION-x86_64-linux`, static musl, and `target/dist/ignite-VERSION.vsix`; VERSION from `editors/vscode/package.json`) |
 
 `cargo install --git` builds `ignite` from cargo's git checkout (`$CARGO_HOME/git/checkouts/`), and
 the installed binary reads its standard library and `ignite-io` from there: do not delete that
@@ -47,3 +50,11 @@ checkout while the binary is in use.
 - No comments in `Taskfile.yml`, `Cargo.toml` or other config files.
 - Commits follow Conventional Commits with a body of bullets saying what changed and why. Never
   force-push `main`.
+
+## Releases
+
+- Version: `editors/vscode/package.json` `version`; tag `vX.Y.Z` on the merge commit that sets it.
+- Steps: a PR bumping the version with a green `task gate`, merged; on the tagged commit `task dist`;
+  `gh release create vX.Y.Z target/dist/ignite-lsp-X.Y.Z-x86_64-linux target/dist/ignite-X.Y.Z.vsix`
+  with notes naming the ignite tag it was built with (`IGNITE_TAG`). The extension downloads the
+  server asset by the name pattern `ignite-lsp-*-x86_64-linux`, so keep it.
