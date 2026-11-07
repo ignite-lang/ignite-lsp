@@ -1,8 +1,8 @@
 {
   "name": "ignite",
   "displayName": "Ignite",
-  "description": "Ignite language support: syntax highlighting and the diagnostics of ignite check through ignite-lsp",
-  "version": "0.1.0",
+  "description": "Ignite language support: syntax highlighting, diagnostics, hover, go to definition and the outline through ignite-lsp",
+  "version": "0.2.0",
   "publisher": "ignite-lang",
   "license": "UNLICENSED",
   "repository": {

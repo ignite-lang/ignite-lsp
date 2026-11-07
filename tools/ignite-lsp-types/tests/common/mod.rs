@@ -18,6 +18,10 @@ pub const ROOTS: &[&str] = &[
     "textDocument/didChange",
     "textDocument/didClose",
     "textDocument/publishDiagnostics",
+    "textDocument/didSave",
+    "textDocument/hover",
+    "textDocument/definition",
+    "textDocument/documentSymbol",
     "$/cancelRequest",
 ];
 
